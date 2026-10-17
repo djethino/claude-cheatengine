@@ -1,6 +1,6 @@
 {
   "name": "asymptomatik-cheatengine",
-  "version": "0.4.0",
+  "version": "0.1.0",
   "description": "Drive Cheat Engine from Claude Code: process attach, memory read/write, value scans, pointers, disassembly, Mono/Unity inspection, cheat tables",
   "author": {
     "name": "ASymptOmatik"
