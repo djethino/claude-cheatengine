@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { lua, raw, type LuaCode } from '../lua/lit.js';
 import { defineTool } from './registry.js';
 import { listBody, pageSchema } from './list.js';
+import { ANTI_CHEAT_ADVICE } from '../anticheat.js';
 
 /** Lua that resolves an address expression into the local `addr`, or reports it and returns. */
 export function resolveAddress(expression: string, local = 'addr'): LuaCode {
@@ -87,6 +88,7 @@ const addressDescription = "Memory address: hex like '0x12345678', symbol like '
 export const memoryTools = [
   defineTool({
     name: 'ce_attach',
+    antiCheatExempt: true,
     description: 'Attach to a process by name or PID.',
     schema: {
       process: z.string().describe("Process name (e.g., 'game.exe') or PID as a decimal string"),
@@ -94,17 +96,32 @@ export const memoryTools = [
     writes: false,
     async run({ process }, ctx) {
       const target = /^\d+$/.test(process.trim()) ? BigInt(process.trim()) : process;
+      // Check for an anti-cheat before CE even opens the process (opening it can be detected)
+      const pidText = await ctx.run(lua`
+        local t = ${target}
+        local pid = type(t) == 'number' and t or getProcessIDFromProcessName(t)
+        _mcp_str = tostring(pid or 0) .. ' ' .. tostring(_mcp_unsafe == true)`);
+      const [pid, unsafe] = (pidText ?? '0 false').split(' ');
+      if (!Number(pid)) return `Error: no running process named ${process} (see ce_list_processes)`;
+      const antiCheats = await ctx.scope.antiCheatOf(Number(pid));
+      if (antiCheats.length && unsafe !== 'true') {
+        return `BLOCKED: not attached. Anti-cheat detected in ${process}: ${antiCheats.join(', ')}. ${ANTI_CHEAT_ADVICE}`;
+      }
+      const warning = antiCheats.length
+        ? `\nWARNING: anti-cheat present (${antiCheats.join(', ')}); UNSAFE mode is on, so the user accepted the ban risk`
+        : '';
       const text = await ctx.run(lua`
-        openProcess(${target})
-        local pid = getOpenedProcessID() or 0
-        if pid == 0 then _mcp_str = 'Error: could not open process ' .. tostring(${target}) return end
-        _mcp_str = string.format('Attached to PID: %d (%s, %s)', pid, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
-      return text ?? 'Error: no answer from Cheat Engine';
+        openProcess(${BigInt(pid)})
+        local opened = getOpenedProcessID() or 0
+        if opened ~= ${BigInt(pid)} then _mcp_str = 'Error: could not open process ' .. ${process} return end
+        _mcp_str = string.format('Attached to PID: %d (%s, %s)', opened, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
+      return (text ?? 'Error: no answer from Cheat Engine') + (text?.startsWith('Error:') ? '' : warning);
     },
   }),
 
   defineTool({
     name: 'ce_list_processes',
+    antiCheatExempt: true,
     description: 'List running processes (paginated).',
     schema: pageSchema(100),
     writes: false,

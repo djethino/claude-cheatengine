@@ -251,6 +251,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_reset',
+    antiCheatExempt: true,
     description: 'Discard a scan and its results (frees the memory and files CE keeps for it).',
     schema: { scan_name: scanName },
     writes: false,
@@ -265,6 +266,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_list',
+    antiCheatExempt: true,
     description: 'List the scans kept by the server, with their result counts.',
     schema: {},
     writes: false,

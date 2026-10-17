@@ -13,6 +13,7 @@ import { installState } from './install.js';
 export const coreTools = [
   defineTool({
     name: 'ce_status',
+    antiCheatExempt: true,
     description:
       'Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed.',
     schema: {
@@ -43,6 +44,7 @@ export const coreTools = [
 
   defineTool({
     name: 'ce_get_logs',
+    antiCheatExempt: true,
     description: "Get the CE plugin's log of recent MCP commands (useful for debugging).",
     schema: {
       clear: z.boolean().default(false).describe('Clear the log buffer after reading'),
@@ -62,6 +64,7 @@ export const coreTools = [
 
   defineTool({
     name: 'ce_output_more',
+    antiCheatExempt: true,
     description: `Read the rest of the previous tool's output when it ended with a "[truncated: ...]" line.
 
 Must be called right after the truncated call: calling any other tool discards it.
@@ -82,6 +85,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
 
   defineTool({
     name: 'ce_safety_status',
+    antiCheatExempt: true,
     description: 'Check the current safety mode: SAFE (tools that can crash the game or CE are locked) or UNSAFE.',
     schema: {},
     writes: false,
@@ -94,6 +98,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
 
   defineTool({
     name: 'ce_safety_enable_writes',
+    antiCheatExempt: true,
     description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access).
 
 IMPORTANT: Do NOT call this tool unless the user explicitly requests it
@@ -112,6 +117,7 @@ Never enable unsafe mode proactively or without clear user consent.`,
 
   defineTool({
     name: 'ce_safety_disable_writes',
+    antiCheatExempt: true,
     description: 'Re-enable SAFE mode: locks the tools that can crash the game or CE again.',
     schema: {},
     writes: false,

@@ -24,7 +24,16 @@ __fake.mem = {}
 process = 'game.exe'
 function targetIs64Bit() return true end
 function getModuleSize(name) if name == 'game.exe' then return 0x1000 end end
-function enumModules() return { { Name = 'game.exe', Address = 0x400000, Size = 0x1000 }, { Name = 'other.dll', Address = 0x800000, Size = 0x100 } } end
+-- Running processes by PID (4242 = game.exe); a test can add modules, e.g. an anti-cheat DLL
+__fake.processes = { ['game.exe'] = 4242, ['protected.exe'] = 5555 }
+__fake.extraModules = { [5555] = { { Name = 'EasyAntiCheat_x64.dll', Address = 0x900000, Size = 0x100 } } }
+function getProcessIDFromProcessName(name) return __fake.processes[name] end
+function enumModules(pid)
+  local list = { { Name = 'game.exe', Address = 0x400000, Size = 0x1000, PathToFile = 'C:/nowhere/game.exe' },
+                 { Name = 'other.dll', Address = 0x800000, Size = 0x100 } }
+  for _, m in ipairs(__fake.extraModules[pid or __fake.pid] or {}) do list[#list + 1] = m end
+  return list
+end
 function enumMemoryRegions() return { { BaseAddress = 0x400000, RegionSize = 0x1000, Protect = 0x20 }, { BaseAddress = 0x500000, RegionSize = 0x2000, Protect = 0x104 } } end
 function getAddressSafe(s)
   if type(s) == 'number' then return s end

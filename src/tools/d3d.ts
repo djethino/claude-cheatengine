@@ -95,6 +95,7 @@ Only ASCII characters 32-126 are drawn (CE's font maps).`,
 
   defineTool({
     name: 'ce_d3d_overlay_remove',
+    antiCheatExempt: true,
     description: 'Remove a text overlay (or all of them).',
     schema: { id: overlayId.optional().describe('Overlay name (default: all overlays)') },
     writes: false,
@@ -118,6 +119,7 @@ Only ASCII characters 32-126 are drawn (CE's font maps).`,
 
   defineTool({
     name: 'ce_screenshot',
+    antiCheatExempt: true,
     description: `Look at the game: a screenshot of the attached process's window, returned as an image (any graphics API; the window must not be minimized).
 
 By default nothing is written to disk. Give save_path to also keep the PNG file.`,

@@ -87,6 +87,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
 
   defineTool({
     name: 'ce_breakpoint_results',
+    antiCheatExempt: true,
     description: 'Instructions that triggered a watchpoint, with hit counts, registers at the first hit and the function range.',
     schema: {
       id: watchId.optional().describe('Watchpoint ID (default: every watchpoint)'),
@@ -117,6 +118,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
 
   defineTool({
     name: 'ce_breakpoint_remove',
+    antiCheatExempt: true,
     description: 'Remove a watchpoint (its results stay readable until removed again), or every watchpoint.',
     schema: {
       id: watchId.optional().describe('Watchpoint ID (default: all of them)'),

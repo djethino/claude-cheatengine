@@ -18,6 +18,7 @@ import { CEPipe, CEPipeError } from './pipe.js';
 import { decodeBytes, incompleteUtf8Tail } from './text.js';
 import { lua, raw, type LuaCode } from '../lua/lit.js';
 import prelude from '../lua/prelude.lua';
+import { ANTI_CHEAT_ADVICE, detectAntiCheat } from '../anticheat.js';
 
 export const PIPE_PATH = '\\\\.\\pipe\\ce-mcp';
 
@@ -37,6 +38,8 @@ const OWNER_LAPSE_S = 60;
 
 const MARK_OWNER = '\u0001OWNER';
 const MARK_INIT = '\u0001INIT';
+/** Followed by a PID: the process CE has open was never checked for an anti-cheat. */
+const MARK_AC = '\u0001AC';
 
 export const BLOCKED_DANGEROUS =
   'BLOCKED: this tool can crash the game or CE, and SAFE mode is on. Ask the user to run /unsafe-ce (or toggle Mode in the CE MCP menu) if they want it.';
@@ -47,6 +50,8 @@ export interface RunOptions {
   dangerous?: boolean;
   /** Refused when CE has no process opened. */
   requiresProcess?: boolean;
+  /** Refused while the process CE has open has an anti-cheat, unless UNSAFE mode is on. */
+  antiCheatGate?: boolean;
   timeoutMs?: number;
   /** Cap on the returned text; the rest stays readable with ce_output_more. */
   maxBytes?: number;
@@ -104,6 +109,7 @@ export class Session {
         release = await this.mutex.acquire();
       },
       takeOver: () => this.takeOver(),
+      antiCheatOf: (pid) => this.antiCheatOf(pid),
     };
     try {
       return await fn(scope);
@@ -179,11 +185,18 @@ export class Session {
       end
       _mcp_owner_seen = os.time()
       _mcp_str = nil
+      local _pid = getOpenedProcessID() or 0
+      local _ac = (_mcp.ac or {})[_pid]
+      if ${options.antiCheatGate ?? false} and _pid ~= 0 and _ac == nil then
+        _mcp_str = ${MARK_AC} .. _pid return #_mcp_str
+      end
       ${log}
       if ${options.dangerous ?? false} and _mcp_unsafe ~= true then
         _mcp_str = ${BLOCKED_DANGEROUS}
-      elseif ${options.requiresProcess ?? false} and (getOpenedProcessID() or 0) == 0 then
+      elseif ${options.requiresProcess ?? false} and _pid == 0 then
         _mcp_str = ${BLOCKED_NO_PROCESS}
+      elseif ${options.antiCheatGate ?? false} and _pid ~= 0 and _ac ~= '' and _mcp_unsafe ~= true then
+        _mcp_str = 'BLOCKED: anti-cheat detected in ' .. tostring(process or _pid) .. ': ' .. _ac .. '. ' .. ${ANTI_CHEAT_ADVICE}
       else
         local f, e = load(${body.code}, ${'=' + (call?.tool ?? 'cemcp')})
         if not f then
@@ -226,12 +239,42 @@ export class Session {
       this.readyConnection = -1;
       text = await runOnce();
     }
+    if (text?.startsWith(MARK_AC)) {
+      // First call on this process: look for an anti-cheat, then run the script with the verdict
+      await this.antiCheatOf(Number(text.slice(MARK_AC.length)));
+      text = await runOnce();
+    }
     if (text === MARK_OWNER) {
       throw new OwnershipError(
         'Another Claude Code session is using Cheat Engine. Call ce_status with take_over=true to take it over (the other session will then get this message).',
       );
     }
     return text;
+  }
+
+  /**
+   * Anti-cheats found in a process (empty when none), detected once per PID and kept in CE
+   * (_mcp.ac) so every server and every tool sees the same verdict. Works on a process CE has not
+   * opened yet (ce_attach checks before attaching).
+   */
+  private async antiCheatOf(pid: number): Promise<string[]> {
+    const cached = await this.query(lua`local ac = (_mcp.ac or {})[${pid}] if ac then _mcp_str = '=' .. ac end`);
+    if (cached !== null) return cached.slice(1) ? cached.slice(1).split(', ') : [];
+    const listing = await this.query(lua`
+      local mods = enumModules(${pid}) or {}
+      local names = {}
+      for i, m in ipairs(mods) do names[i] = m.Name end
+      _mcp_str = (mods[1] and mods[1].PathToFile or '') .. '\n' .. table.concat(names, '\n')`);
+    const [exePath = '', ...modules] = (listing ?? '').split('\n');
+    const found = detectAntiCheat(modules, exePath);
+    await this.runInt(lua`_mcp.ac = _mcp.ac or {} _mcp.ac[${pid}] = ${found.join(', ')} return 1`);
+    return found;
+  }
+
+  /** Run protocol-internal Lua that leaves a text in _mcp_str (no gate, no log, no truncation). */
+  private async query(body: LuaCode): Promise<string | null> {
+    const length = await this.runInt(this.chunk(null, body, {}));
+    return length ? this.readString('_mcp_str', Number(length), Number(length), 0) : null;
   }
 
   /** Read part of the text kept for continuation by the last truncated output. */
@@ -303,4 +346,6 @@ export interface Scope {
   pause(ms: number): Promise<void>;
   /** Claim CE for this server even if another session is using it. */
   takeOver(): Promise<void>;
+  /** Anti-cheats found in a process, opened or not (empty when none). */
+  antiCheatOf(pid: number): Promise<string[]>;
 }
