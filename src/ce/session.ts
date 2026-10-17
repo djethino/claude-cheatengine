@@ -1,0 +1,279 @@
+/**
+ * Exclusive, ordered access to Cheat Engine.
+ *
+ * CE runs every pipe script on its main Lua state and the server passes results through Lua
+ * globals (_mcp_str, _mcp_more): two tool calls must never interleave their scripts. A tool
+ * call runs inside exclusive(); a long job can give CE back between polls with
+ * scope.pause(), so other tools are not blocked while CE works in the background.
+ *
+ * Every script a tool sends is wrapped in one chunk that, in a single round trip:
+ * checks this server still owns CE (another Claude Code session may be connected to it),
+ * logs the call in CE, applies the SAFE gate and the attached-process check, runs the body
+ * with load() + pcall() and returns the byte length of the resulting text. The gate is part
+ * of the same chunk as the action, so it cannot be skipped or raced.
+ */
+
+import { randomBytes } from 'crypto';
+import { CEPipe, CEPipeError } from './pipe.js';
+import { decodeBytes, incompleteUtf8Tail } from './text.js';
+import { lua, raw, type LuaCode } from '../lua/lit.js';
+import prelude from '../lua/prelude.lua';
+
+export const PIPE_PATH = '\\\\.\\pipe\\ce-mcp';
+
+/** Default cap on the text returned by one tool call (about 2,500 tokens). */
+export const DEFAULT_MAX_BYTES = 10_000;
+/** Largest read ce_output_more accepts. */
+export const MAX_OUTPUT_BYTES = 100_000;
+/** Default limit for one round trip; long synchronous operations pass their own. */
+export const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** Lua global holding the full text of the last truncated output, read back by ce_output_more. */
+const MORE_VAR = '_mcp_more';
+/** Another server whose last call is older than this has stopped: its claim on CE lapses. */
+const OWNER_LAPSE_S = 60;
+
+const MARK_OWNER = '\u0001OWNER';
+const MARK_INIT = '\u0001INIT';
+
+export const BLOCKED_DANGEROUS =
+  'BLOCKED: this tool can crash the game or CE, and SAFE mode is on. Ask the user to run /unsafe-ce (or toggle Mode in the CE MCP menu) if they want it.';
+export const BLOCKED_NO_PROCESS = 'BLOCKED: no process attached. Use ce_attach first.';
+
+export interface RunOptions {
+  /** Crash-prone tool: refused while SAFE mode is on. */
+  dangerous?: boolean;
+  /** Refused when CE has no process opened. */
+  requiresProcess?: boolean;
+  timeoutMs?: number;
+  /** Cap on the returned text; the rest stays readable with ce_output_more. */
+  maxBytes?: number;
+}
+
+export interface CallInfo {
+  tool: string;
+  /** Short argument summary shown in CE's MCP log. */
+  args: string;
+}
+
+class Mutex {
+  private tail: Promise<void> = Promise.resolve();
+
+  /** Resolves with a release function once every earlier holder has released. */
+  acquire(): Promise<() => void> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const turn = this.tail.then(() => release);
+    this.tail = this.tail.then(() => held);
+    return turn;
+  }
+}
+
+export class OwnershipError extends Error {}
+
+export class Session {
+  private readonly mutex = new Mutex();
+  private readonly pipe: CEPipe;
+  private readonly owner = randomBytes(8).toString('hex');
+  private readyConnection = -1;
+  private firstConnection = true;
+  /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
+  private moreTotal = 0;
+
+  constructor(
+    pipePath: string = PIPE_PATH,
+    private readonly version: string,
+  ) {
+    this.pipe = new CEPipe(pipePath);
+  }
+
+  /** Run fn with exclusive access to CE. */
+  async exclusive<T>(call: CallInfo, fn: (scope: Scope) => Promise<T>): Promise<T> {
+    let release = await this.mutex.acquire();
+    // A new tool call makes the previous truncated output unreadable (except for ce_output_more)
+    if (call.tool !== 'ce_output_more') this.moreTotal = 0;
+    const scope: Scope = {
+      run: (body, options) => this.run(call, body, options ?? {}),
+      runInt: (code, timeoutMs) => this.runInt(code, timeoutMs),
+      readMore: (offset, maxBytes) => this.readMore(offset, maxBytes),
+      pause: async (ms) => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        release = await this.mutex.acquire();
+      },
+      takeOver: () => this.takeOver(),
+    };
+    try {
+      return await fn(scope);
+    } finally {
+      release();
+    }
+  }
+
+  close(): void {
+    this.pipe.close();
+  }
+
+  /** First script of every connection: claim CE, reset SAFE once, install the helpers. */
+  private async ensureReady(): Promise<void> {
+    if (this.pipe.connected && this.pipe.connectionId === this.readyConnection) return;
+    const init = lua`
+      _mcp_server = { owner = ${this.owner}, version = ${this.version}, resetSafe = ${this.firstConnection}, lapse = ${OWNER_LAPSE_S} }
+      ${raw(prelude)}
+      return 1`;
+    await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS);
+    this.readyConnection = this.pipe.connectionId;
+    this.firstConnection = false;
+    this.moreTotal = 0;
+  }
+
+  private async takeOver(): Promise<void> {
+    await this.ensureReady();
+    await this.pipe.exec(lua`_mcp_owner = ${this.owner}; _mcp_owner_seen = os.time(); return 1`.code, DEFAULT_TIMEOUT_MS);
+  }
+
+  /** Raw integer result of a protocol-internal script (no gate, no text). */
+  private async runInt(code: LuaCode, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<bigint> {
+    await this.ensureReady();
+    return this.pipe.exec(code.code, timeoutMs);
+  }
+
+  private chunk(call: CallInfo | null, body: LuaCode, options: RunOptions): LuaCode {
+    const log = call
+      ? lua`if CEMCP_logCommand then pcall(CEMCP_logCommand, ${call.tool}, ${call.args.slice(0, 100)}) end`
+      : raw('');
+    return lua`
+      if _mcp == nil then _mcp_str = ${MARK_INIT} return #_mcp_str end
+      if _mcp_owner ~= ${this.owner} then
+        if _mcp_owner ~= nil and os.time() - (_mcp_owner_seen or 0) <= ${OWNER_LAPSE_S} then
+          _mcp_str = ${MARK_OWNER} return #_mcp_str
+        end
+        _mcp_owner = ${this.owner}
+      end
+      _mcp_owner_seen = os.time()
+      _mcp_str = nil
+      ${log}
+      if ${options.dangerous ?? false} and _mcp_unsafe ~= true then
+        _mcp_str = ${BLOCKED_DANGEROUS}
+      elseif ${options.requiresProcess ?? false} and (getOpenedProcessID() or 0) == 0 then
+        _mcp_str = ${BLOCKED_NO_PROCESS}
+      else
+        local f, e = load(${body.code}, ${'=' + (call?.tool ?? 'cemcp')})
+        if not f then
+          _mcp_str = "LUA_SYNTAX_ERROR: " .. tostring(e)
+        else
+          local ok, err = pcall(f)
+          if not ok then _mcp_str = "LUA_ERROR: " .. tostring(err) end
+        end
+      end
+      if _mcp_str ~= nil and type(_mcp_str) ~= "string" then _mcp_str = tostring(_mcp_str) end
+      return _mcp_str and #_mcp_str or 0`;
+  }
+
+  /** Calls already logged in CE: only the first script of a call is logged. */
+  private readonly logged = new WeakSet<CallInfo>();
+
+  /**
+   * Run a tool body (Lua that leaves its text result in _mcp_str) and return that text, or null
+   * when the body set nothing.
+   */
+  private async run(call: CallInfo, body: LuaCode, options: RunOptions): Promise<string | null> {
+    const firstOfCall = !this.logged.has(call);
+    this.logged.add(call);
+    const code = this.chunk(firstOfCall ? call : null, body, options);
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+
+    const runOnce = async (): Promise<string | null> => {
+      const length = await this.runInt(code, timeoutMs);
+      const connection = this.pipe.connectionId;
+      const text = length ? await this.readString('_mcp_str', Number(length), maxBytes, 0) : null;
+      // A reconnect during the transfer would read the globals of a fresh CE Lua state
+      if (this.pipe.connectionId !== connection) throw new CEPipeError('Connection to Cheat Engine lost while reading the result');
+      return text;
+    };
+
+    let text = await runOnce();
+    if (text === MARK_INIT) {
+      // CE restarted between our setup and this script: set up again, then run it once more
+      this.readyConnection = -1;
+      text = await runOnce();
+    }
+    if (text === MARK_OWNER) {
+      throw new OwnershipError(
+        'Another Claude Code session is using Cheat Engine. Call ce_status with take_over=true to take it over (the other session will then get this message).',
+      );
+    }
+    return text;
+  }
+
+  /** Read part of the text kept for continuation by the last truncated output. */
+  private async readMore(offset: number, maxBytes: number): Promise<string> {
+    if (!this.moreTotal) {
+      return 'Nothing to continue: no truncated output is pending (it is discarded as soon as another tool is called)';
+    }
+    if (!Number.isInteger(offset) || offset < 0 || offset >= this.moreTotal) {
+      return `Error: offset must be between 0 and ${this.moreTotal - 1}`;
+    }
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_OUTPUT_BYTES) {
+      return `Error: max_bytes must be between 1 and ${MAX_OUTPUT_BYTES}`;
+    }
+    return (await this.readString(MORE_VAR, this.moreTotal, maxBytes, offset)) ?? '';
+  }
+
+  /**
+   * Transfer bytes [start, start + maxBytes) of a Lua string global, 8 bytes per round trip.
+   * When bytes remain, the text ends with a "[truncated: ...]" line and the full string is kept
+   * in _mcp_more for ce_output_more.
+   */
+  private async readString(varName: string, total: number, maxBytes: number, start: number): Promise<string | null> {
+    if (start >= total) return null;
+    let end = Math.min(total, start + maxBytes);
+    const data = Buffer.alloc(end - start);
+    const variable = raw(varName);
+
+    for (let pos = start; pos < end; pos += 8) {
+      const packed = await this.runInt(lua`
+        local a, b, c, d, e, f, g, h = string.byte(${variable}, ${pos + 1}, ${pos + 8})
+        return (a or 0) | ((b or 0) << 8) | ((c or 0) << 16) | ((d or 0) << 24)
+          | ((e or 0) << 32) | ((f or 0) << 40) | ((g or 0) << 48) | ((h or 0) << 56)`);
+      const block = Buffer.alloc(8);
+      block.writeBigUInt64LE(packed);
+      block.copy(data, pos - start, 0, Math.min(8, end - pos));
+    }
+
+    let bytes: Uint8Array = data;
+    if (end < total) {
+      // Stop before a multi-byte character cut in half; the next read starts at it
+      const cut = incompleteUtf8Tail(bytes);
+      if (cut < bytes.length) {
+        bytes = bytes.subarray(0, bytes.length - cut);
+        end -= cut;
+      }
+      if (varName !== MORE_VAR) {
+        await this.runInt(raw(`${MORE_VAR} = ${varName}; return 1`));
+        this.moreTotal = total;
+      }
+    }
+
+    let text = decodeBytes(bytes);
+    if (end < total) {
+      text +=
+        `\n[truncated: bytes ${start + 1}-${end} of ${total} shown. ` +
+        `Call ce_output_more(offset=${end}) next to read the rest; calling any other tool discards it]`;
+    }
+    return text;
+  }
+}
+
+export interface Scope {
+  /** Run a tool body (gated, logged) and return the text it left in _mcp_str, or null. */
+  run(body: LuaCode, options?: RunOptions): Promise<string | null>;
+  /** Run protocol-internal Lua and return its raw integer result. */
+  runInt(code: LuaCode, timeoutMs?: number): Promise<bigint>;
+  readMore(offset: number, maxBytes: number): Promise<string>;
+  /** Give CE back to other tool calls for ms milliseconds (long jobs between two polls). */
+  pause(ms: number): Promise<void>;
+  /** Claim CE for this server even if another session is using it. */
+  takeOver(): Promise<void>;
+}

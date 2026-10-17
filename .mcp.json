@@ -1,0 +1,9 @@
+{
+  "cheatengine": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+    "env": {
+      "CLAUDE_PLUGIN_OPTION_READ_ONLY": "${user_config.read_only}"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "asymptomatik-cheatengine",
+  "version": "0.4.0",
+  "description": "Drive Cheat Engine from Claude Code: process attach, memory read/write, value scans, pointers, disassembly, Mono/Unity inspection, cheat tables",
+  "author": {
+    "name": "ASymptOmatik"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "cheat-engine",
+    "memory",
+    "game-modding",
+    "reverse-engineering"
+  ],
+  "userConfig": {
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Refuse every tool that changes the game or writes a file (memory writes, freezes, code injection, cheat table saves...). Reading, scanning and watching stay available. Independent of SAFE mode, which only locks the crash-prone tools.",
+      "default": false
+    }
+  }
+}

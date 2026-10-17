@@ -1,0 +1,5 @@
+# Shipped build output: LF everywhere so the CI "build is up to date" check is platform independent
+dist/** text eol=lf
+
+# Embedded in the bundle and copied byte for byte into the per-user CE plugin folder
+ce-plugin/** text eol=lf

@@ -1,0 +1,6 @@
+node_modules/
+# Test bundles written by scripts/test.mjs
+.test-build/
+.claude/
+analyse/
+TODO.md
