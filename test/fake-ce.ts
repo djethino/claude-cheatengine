@@ -18,6 +18,84 @@ function openProcess(p) __fake.pid = type(p) == 'number' and p or 4242 return tr
 function print(...) local t = table.pack(...) for i = 1, t.n do t[i] = tostring(t[i]) end __fake.prints[#__fake.prints + 1] = table.concat(t, ' ') end
 function CEMCP_logCommand(tool, args) __fake.logs[#__fake.logs + 1] = tool .. ' ' .. tostring(args) end
 function updateMenuState() end
+
+-- Simulated target: sparse byte memory, one module "game.exe" at 0x400000 (size 0x1000)
+__fake.mem = {}
+process = 'game.exe'
+function targetIs64Bit() return true end
+function getModuleSize(name) if name == 'game.exe' then return 0x1000 end end
+function enumModules() return { { Name = 'game.exe', Address = 0x400000, Size = 0x1000 }, { Name = 'other.dll', Address = 0x800000, Size = 0x100 } } end
+function enumMemoryRegions() return { { BaseAddress = 0x400000, RegionSize = 0x1000, Protect = 0x20 }, { BaseAddress = 0x500000, RegionSize = 0x2000, Protect = 0x104 } } end
+function getAddressSafe(s)
+  if type(s) == 'number' then return s end
+  if s == 'game.exe' then return 0x400000 end
+  local m, off = s:match('^(game%.exe)%+(%w+)$')
+  if m then return 0x400000 + tonumber(off, 16) end
+  return tonumber(s)
+end
+function getNameFromAddress(a)
+  if a >= 0x400000 and a < 0x401000 then return string.format('game.exe+%X', a - 0x400000) end
+  return string.format('%X', a)
+end
+local function mapped(a) return a >= 0x400000 and a < 0x402000 end
+function readBytes(a, n, asTable)
+  local t = {}
+  for i = 0, n - 1 do
+    if not mapped(a + i) then return nil end
+    t[#t + 1] = __fake.mem[a + i] or 0
+  end
+  if asTable then return t end
+  return table.unpack(t)
+end
+function writeBytes(a, t, ...)
+  if type(t) ~= 'table' then t = { t, ... } end
+  for i, b in ipairs(t) do
+    if not mapped(a + i - 1) then return false end
+    __fake.mem[a + i - 1] = b & 0xFF
+  end
+  return true
+end
+local function readFmt(fmt, n) return function(a, signed)
+  local b = readBytes(a, n, true)
+  if not b then return nil end
+  local v = string.unpack(fmt, string.char(table.unpack(b)))
+  return v
+end end
+local function writeFmt(fmt) return function(a, v)
+  local s = string.pack(fmt, v)
+  return writeBytes(a, { s:byte(1, -1) })
+end end
+local readU16, readU32 = readFmt('<I2', 2), readFmt('<I4', 4)
+function readSmallInteger(a, signed) return (signed and readFmt('<i2', 2) or readU16)(a) end
+function readInteger(a, signed) return (signed and readFmt('<i4', 4) or readU32)(a) end
+readQword, readFloat, readDouble = readFmt('<i8', 8), readFmt('<f', 4), readFmt('<d', 8)
+readPointer = readQword
+writeSmallInteger = function(a, v) return writeFmt('<I2')(a, v & 0xFFFF) end
+writeInteger = function(a, v) return writeFmt('<I4')(a, v & 0xFFFFFFFF) end
+writeQword, writeFloat, writeDouble = writeFmt('<i8'), writeFmt('<f'), writeFmt('<d')
+function readString(a, max, wide)
+  local out = {}
+  for i = 0, max - 1 do
+    local c = readBytes(a + i, 1)
+    if not c or c == 0 then break end
+    out[#out + 1] = string.char(c)
+  end
+  return table.concat(out)
+end
+function writeString(a, s) return writeBytes(a, { s:byte(1, -1) }) end
+function disassemble(a) return string.format('%X - 90 - nop', a) end
+function getInstructionSize(a) return 1 end
+local function stringlist(items)
+  local o = { Count = #items, destroy = function() end }
+  for i, v in ipairs(items) do o[i - 1] = v end
+  return o
+end
+function createStringlist() return stringlist({}) end
+function getProcessList(sl) sl[0], sl[1], sl.Count = '00001A2B-game.exe', '00000004-System', 2 end
+function AOBScan(pattern, prot)
+  __fake.lastAob = { pattern = pattern, prot = prot }
+  return stringlist({ '400010', '400020', '800010' })
+end
 `;
 
 // lua_tointeger() of the script's result, as a decimal string (exact on 64 bits)
