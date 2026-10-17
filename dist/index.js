@@ -13560,7 +13560,7 @@ function lua(strings, ...values) {
 }
 
 // src/lua/prelude.lua
-var prelude_default = "-- First script of every connection from the MCP server (src/ce/session.ts), run in CE's Lua state.\n-- _mcp_server = { owner, version, resetSafe, lapse } is set just before this code.\n--\n-- Helpers live here rather than in the CE plugin (ce-plugin/ce-mcp-server.lua): the plugin is\n-- only loaded when CE starts, so a CE launched before a plugin update would lack new helpers.\n\nlocal server = _mcp_server\n_mcp_server = nil\n\n-- Claim CE unless another server is still using it (its last call is recent)\nif _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_seen or 0) > server.lapse then\n  _mcp_owner = server.owner\n  _mcp_owner_seen = os.time()\n  -- SAFE mode is on whenever a server starts: an earlier session's unlock does not carry over\n  if server.resetSafe then\n    _mcp_unsafe = false\n    if updateMenuState then pcall(updateMenuState) end\n  end\nend\n\n-- Kept across reconnections of the same CE session (running jobs survive a server restart)\n_mcp = _mcp or {}\n_mcp.version = server.version\n\nprint(string.format('[CE-MCP] asymptomatik-cheatengine %s connected - Mode: %s', server.version, _mcp_unsafe and 'UNSAFE' or 'SAFE'))\n";
+var prelude_default = "-- First script of every connection from the MCP server (src/ce/session.ts), run in CE's Lua state.\n-- _mcp_server = { owner, version, resetSafe, lapse } is set just before this code.\n--\n-- Helpers live here rather than in the CE plugin (ce-plugin/ce-mcp-server.lua): the plugin is\n-- only loaded when CE starts, so a CE launched before a plugin update would lack new helpers.\n\nlocal server = _mcp_server\n_mcp_server = nil\n\n-- Claim CE unless another server is still using it (its last call is recent)\nif _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_seen or 0) > server.lapse then\n  _mcp_owner = server.owner\n  _mcp_owner_seen = os.time()\n  -- SAFE mode is on whenever a server starts: an earlier session's unlock does not carry over\n  if server.resetSafe then\n    _mcp_unsafe = false\n    if updateMenuState then pcall(updateMenuState) end\n  end\nend\n\n-- Kept across reconnections of the same CE session (running jobs survive a server restart)\n_mcp = _mcp or {}\n_mcp.version = server.version\n_mcp.jobs = _mcp.jobs or {}\n_mcp.nextJob = _mcp.nextJob or 0\n\n--------------------------------------------------------------------------------\n-- Jobs: long operations run without blocking CE's main thread.\n--\n-- spec = {\n--   kind = 'pointer scan',             -- shown in the progress window and job status\n--   run = function(job, thread) end,    -- optional, runs in a CE thread; check job.cancelled\n--   update = function(job) end,         -- optional, main thread: refresh job.done/total/message\n--   finish = function(job) return 'result text' end,  -- main thread, once run has returned\n--   window = true,                      -- show a progress window with a Cancel button\n-- }\n-- job.status: running -> finishing -> done | cancelled | error\n--------------------------------------------------------------------------------\n\nlocal function closeWindow(job)\n  if job.form then\n    pcall(function() job.form.destroy() end)\n    job.form = nil\n  end\nend\n\nlocal function openWindow(job)\n  local form = createForm(false)\n  form.Caption = 'CE MCP - ' .. job.kind\n  form.Width, form.Height = 360, 110\n  form.Position = 'poScreenCenter'\n  form.BorderStyle = 'bsSingle'\n  local label = createLabel(form)\n  label.Left, label.Top = 12, 10\n  label.Caption = job.kind .. '...'\n  local bar = createProgressBar(form)\n  bar.Left, bar.Top, bar.Width, bar.Height = 12, 32, 336, 18\n  bar.Max = 1000\n  local cancel = createButton(form)\n  cancel.Caption = 'Cancel'\n  cancel.Left, cancel.Top, cancel.Width = 274, 60, 75\n  cancel.OnClick = function() _mcp.cancelJob(job.id) end\n  form.OnClose = function() _mcp.cancelJob(job.id) return caHide end\n  form.show()\n  job.form, job.label, job.bar = form, label, bar\nend\n\nlocal function refreshWindow(job)\n  if not job.form then return end\n  local text = job.message ~= '' and job.message or (job.kind .. '...')\n  if job.total and job.total > 0 then\n    job.bar.Position = math.floor(1000 * math.min(job.done, job.total) / job.total)\n    text = string.format('%s (%d%%)', text, math.floor(100 * math.min(job.done, job.total) / job.total))\n  end\n  job.label.Caption = text\nend\n\n-- Main-thread step of a job: progress refresh, then finish once its thread has returned\nfunction _mcp.stepJob(job)\n  if job.status ~= 'running' and job.status ~= 'finishing' then return end\n  if job.spec.update then\n    local ok, err = pcall(job.spec.update, job)\n    if not ok then job.status, job.error = 'error', tostring(err) end\n  end\n  if job.status == 'finishing' then\n    if job.cancelled then\n      job.status = 'cancelled'\n    else\n      local ok, result = pcall(job.spec.finish, job)\n      if ok then job.status, job.result = 'done', tostring(result) else job.status, job.error = 'error', tostring(result) end\n    end\n  end\n  if job.status == 'running' or job.status == 'finishing' then refreshWindow(job) else closeWindow(job) end\nend\n\nfunction _mcp.startJob(spec)\n  _mcp.nextJob = _mcp.nextJob + 1\n  local job = { id = _mcp.nextJob, kind = spec.kind, spec = spec, status = 'running', done = 0, total = nil,\n                message = '', cancelled = false, started = os.time() }\n  _mcp.jobs[job.id] = job\n  if spec.window then openWindow(job) end\n  if spec.run then\n    createThread(function(thread)\n      thread.Name = 'CE MCP ' .. spec.kind\n      local ok, err = pcall(spec.run, job, thread)\n      if not ok and job.status == 'running' then job.status, job.error = 'error', tostring(err) end\n      if job.status == 'running' then job.status = 'finishing' end\n    end)\n  else\n    job.status = 'finishing'\n  end\n  -- A timer keeps windows and finished jobs moving even when no MCP call polls them\n  if not _mcp.jobTimer then\n    _mcp.jobTimer = createTimer()\n    _mcp.jobTimer.Interval = 200\n    _mcp.jobTimer.OnTimer = function()\n      local active = false\n      for _, j in pairs(_mcp.jobs) do\n        _mcp.stepJob(j)\n        if j.status == 'running' or j.status == 'finishing' then active = true end\n      end\n      if not active then _mcp.jobTimer.Enabled = false end\n    end\n  end\n  _mcp.jobTimer.Enabled = true\n  return job\nend\n\nfunction _mcp.cancelJob(id)\n  local job = _mcp.jobs[id]\n  if job and (job.status == 'running' or job.status == 'finishing') then job.cancelled = true end\n  return job\nend\n\n-- One-line status for the MCP server: status|done|total|message\nfunction _mcp.jobLine(id)\n  local job = _mcp.jobs[id]\n  if not job then return 'missing|0|0|' end\n  _mcp.stepJob(job)\n  local message = (job.error or job.message or ''):gsub('[\\r\\n|]', ' ')\n  return string.format('%s|%d|%d|%s', job.status, math.floor(job.done or 0), math.floor(job.total or 0), message)\nend\n\nprint(string.format('[CE-MCP] asymptomatik-cheatengine %s connected - Mode: %s', server.version, _mcp_unsafe and 'UNSAFE' or 'SAFE'))\n";
 
 // src/ce/session.ts
 var PIPE_PATH = "\\\\.\\pipe\\ce-mcp";
@@ -22534,8 +22534,106 @@ The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
   })
 ];
 
+// src/tools/jobs.ts
+var POLL_MS = 250;
+var MAX_WAIT_MS = 10 * 6e4;
+var waitSchema = {
+  wait: external_exports.boolean().default(true).describe("Wait for the result (default). false returns a job id at once: read it later with ce_job_status")
+};
+function parseLine(line) {
+  const [status = "missing", done = "0", total = "0", ...message] = (line ?? "").split("|");
+  return { status, done: Number(done), total: Number(total), message: message.join("|") };
+}
+async function jobLine(ctx, id) {
+  return parseLine(await ctx.scope.run(lua`_mcp_str = _mcp.jobLine(${id})`));
+}
+async function takeResult(ctx, id, line) {
+  if (line.status === "error") {
+    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
+    return `Error: job ${id} failed: ${line.message}`;
+  }
+  if (line.status === "cancelled") {
+    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
+    return `Job ${id} was cancelled`;
+  }
+  const text = await ctx.scope.run(lua`local job = _mcp.jobs[${id}] _mcp_str = job and job.result _mcp.jobs[${id}] = nil`);
+  return text ?? "(no result)";
+}
+async function waitForJob(ctx, id, kind) {
+  const deadline = Date.now() + MAX_WAIT_MS;
+  for (; ; ) {
+    const line = await jobLine(ctx, id);
+    if (line.status === "missing") return `Error: job ${id} no longer exists (CE was restarted?)`;
+    if (line.status === "done" || line.status === "error" || line.status === "cancelled") return takeResult(ctx, id, line);
+    await ctx.progress(line.done, line.total || void 0, line.message || `${kind}...`);
+    if (ctx.signal.aborted) {
+      await ctx.scope.run(lua`_mcp.cancelJob(${id})`);
+      return `Job ${id} cancelled: the request was aborted`;
+    }
+    if (Date.now() > deadline) {
+      return `Job ${id} (${kind}) is still running in CE (${line.message || "no progress information"}). Call ce_job_status(job_id=${id}) later.`;
+    }
+    await ctx.scope.pause(POLL_MS);
+  }
+}
+var jobTools = [
+  defineTool({
+    name: "ce_job_status",
+    description: "Progress or result of a CE job started with wait=false (or one that outlived its call). Returns the result once done.",
+    schema: {
+      job_id: external_exports.number().int().min(1).describe("Job id given when the job started"),
+      wait: external_exports.boolean().default(false).describe("Wait until the job finishes")
+    },
+    writes: false,
+    async run({ job_id, wait }, ctx) {
+      const line = await jobLine(ctx, job_id);
+      if (line.status === "missing") return `Error: no job ${job_id} (finished jobs are forgotten once their result is read)`;
+      if (line.status === "running" || line.status === "finishing") {
+        if (wait) return waitForJob(ctx, job_id, `job ${job_id}`);
+        const progress = line.total ? ` ${Math.floor(100 * line.done / line.total)}%` : "";
+        return `Job ${job_id}: running${progress}${line.message ? ` - ${line.message}` : ""}`;
+      }
+      return takeResult(ctx, job_id, line);
+    }
+  }),
+  defineTool({
+    name: "ce_job_cancel",
+    description: "Cancel a running CE job (the user can also press Cancel in its progress window in CE).",
+    schema: {
+      job_id: external_exports.number().int().min(1).describe("Job id")
+    },
+    writes: false,
+    async run({ job_id }, ctx) {
+      const text = await ctx.run(lua`
+        local job = _mcp.cancelJob(${job_id})
+        if not job then _mcp_str = 'Error: no job ' .. ${job_id} return end
+        _mcp_str = string.format('Job %d: %s', job.id, job.cancelled and 'cancellation requested' or job.status)`);
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_job_list",
+    description: "List the CE jobs that are running or whose result has not been read yet.",
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const text = await ctx.run(lua`
+        local lines = {}
+        for id, job in pairs(_mcp.jobs) do
+          _mcp.stepJob(job)
+          lines[#lines + 1] = string.format('%d: %s - %s%s (%ds)', id, job.kind, job.status,
+            job.total and job.total > 0 and string.format(' %d%%', math.floor(100 * job.done / job.total)) or '',
+            os.time() - job.started)
+        end
+        table.sort(lines)
+        _mcp_str = #lines > 0 and table.concat(lines, '\n') or 'No jobs'`);
+      return text ?? "No jobs";
+    }
+  })
+];
+
 // src/tools/index.ts
-var allTools = [...coreTools, ...memoryTools];
+var allTools = [...coreTools, ...memoryTools, ...jobTools];
 var names = /* @__PURE__ */ new Set();
 for (const tool of allTools) {
   if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);

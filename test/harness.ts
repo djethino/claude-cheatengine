@@ -10,6 +10,7 @@ import { FakeCE, type FakeCEOptions } from './fake-ce.js';
 import { Session } from '../src/ce/session.js';
 import { createServer } from '../src/server.js';
 import { allTools } from '../src/tools/index.js';
+import type { ToolDef } from '../src/tools/registry.js';
 
 export interface ToolResult {
   text: string;
@@ -18,19 +19,23 @@ export interface ToolResult {
 
 export interface Harness {
   ce: FakeCE;
-  call(name: string, args?: Record<string, unknown>): Promise<ToolResult>;
+  call(name: string, args?: Record<string, unknown>, onProgress?: (message: string) => void): Promise<ToolResult>;
   /** UNSAFE mode on and a process attached (pid 7). */
   unlock(): Promise<void>;
 }
 
-export function useHarness(options: FakeCEOptions = {}): Harness {
+export function useHarness(options: FakeCEOptions = {}, extraTools: ToolDef[] = []): Harness {
   let session: Session | undefined;
   let client: Client | undefined;
 
   const harness: Harness = {
     ce: undefined as unknown as FakeCE,
-    async call(name, args = {}) {
-      const result = await client!.callTool({ name, arguments: args });
+    async call(name, args = {}, onProgress) {
+      const result = await client!.callTool(
+        { name, arguments: args },
+        undefined,
+        onProgress ? { onprogress: (p) => onProgress(p.message ?? '') } : undefined,
+      );
       const content = result.content as Array<{ type: string; text: string }>;
       return { text: content.map((c) => c.text).join(''), isError: result.isError === true };
     },
@@ -54,7 +59,7 @@ export function useHarness(options: FakeCEOptions = {}): Harness {
     harness.ce.resetLuaState();
     delete process.env.CLAUDE_PLUGIN_OPTION_READ_ONLY;
     session = new Session(harness.ce.path, 'test');
-    const server = createServer(session, allTools, 'test');
+    const server = createServer(session, [...allTools, ...extraTools], 'test');
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     client = new Client({ name: 'test', version: '1' });

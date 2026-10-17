@@ -92,6 +92,29 @@ local function stringlist(items)
 end
 function createStringlist() return stringlist({}) end
 function getProcessList(sl) sl[0], sl[1], sl.Count = '00001A2B-game.exe', '00000004-System', 2 end
+-- Threads run between two pipe scripts (one step per script), like work done in the background
+__fake.threads = {}
+function createThread(fn)
+  local t = { Name = '', Terminated = false }
+  __fake.threads[#__fake.threads + 1] = coroutine.create(function() fn(t) end)
+  return t
+end
+function __fake.stepThreads()
+  local pending = {}
+  for _, co in ipairs(__fake.threads) do
+    local ok, err = coroutine.resume(co)
+    if not ok then __fake.threadError = err end
+    if coroutine.status(co) ~= 'dead' then pending[#pending + 1] = co end
+  end
+  __fake.threads = pending
+end
+-- A job's thread can call this to wait for the next step
+function __fake.yield() if coroutine.isyieldable() then coroutine.yield() end end
+caHide = 1
+function createTimer() return { Interval = 1000, Enabled = true } end
+local function control() return { destroy = function() __fake.windows = (__fake.windows or 1) - 1 end, show = function() __fake.windows = (__fake.windows or 0) + 1 end } end
+function createForm() return control() end
+createLabel, createProgressBar, createButton = control, control, control
 function AOBScan(pattern, prot)
   __fake.lastAob = { pattern = pattern, prot = prot }
   return stringlist({ '400010', '400020', '800010' })
@@ -186,6 +209,7 @@ export class FakeCE {
 
   private async answer(socket: Socket, script: string): Promise<void> {
     this.scripts.push(script);
+    this.vm.run('__fake.stepThreads()');
     this.vm.setGlobalString('__script', script);
     const result = BigInt.asUintN(64, BigInt(this.vm.run(RUNNER) as string));
     if (this.delayNext) {

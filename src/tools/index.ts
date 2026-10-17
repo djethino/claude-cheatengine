@@ -1,8 +1,9 @@
 import type { ToolDef } from './registry.js';
 import { coreTools } from './core.js';
 import { memoryTools } from './memory.js';
+import { jobTools } from './jobs.js';
 
-export const allTools: ToolDef[] = [...coreTools, ...memoryTools];
+export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...jobTools];
 
 const names = new Set<string>();
 for (const tool of allTools) {
