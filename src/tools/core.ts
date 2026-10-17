@@ -9,6 +9,7 @@ import { defineTool } from './registry.js';
 import { readOnly } from '../options.js';
 import { CEPipeError } from '../ce/pipe.js';
 import { installState } from './install.js';
+import { pluginScriptHash } from '../install.js';
 
 export const coreTools = [
   defineTool({
@@ -27,10 +28,17 @@ export const coreTools = [
       let connection: string;
       try {
         if (take_over) await ctx.scope.takeOver();
-        connection =
+        const reply =
           (await ctx.run(lua`
-            _mcp_str = string.format('Connected: %s - CE %s (PID: %d) [%s]', _VERSION, tostring(getCEVersion()),
-              getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`)) ?? 'Error: no answer from Cheat Engine';
+            _mcp_str = string.format('%s\nConnected: %s - CE %s (PID: %d) [%s]', CEMCP and tostring(CEMCP.scriptHash) or 'none',
+              _VERSION, tostring(getCEVersion()), getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`)) ?? '';
+        const [loadedHash, ...rest] = reply.split('\n');
+        connection = rest.join('\n') || 'Error: no answer from Cheat Engine';
+        if (loadedHash === 'none') {
+          connection += '\nCE plugin not loaded in this Cheat Engine session (the pipe was opened another way): MCP menu and logs unavailable';
+        } else if (loadedHash !== String(pluginScriptHash())) {
+          connection += '\nCheat Engine runs an older copy of the plugin script: restart Cheat Engine to load the updated one';
+        }
       } catch (err) {
         // Still report the install state: it tells why CE may not answer
         if (!(err instanceof CEPipeError)) throw err;

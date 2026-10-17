@@ -6,14 +6,20 @@ import { useHarness } from './harness.js';
 import { Session, BLOCKED_DANGEROUS } from '../src/ce/session.js';
 import { createServer, BLOCKED_READ_ONLY } from '../src/server.js';
 import { allTools } from '../src/tools/index.js';
+import { pluginScriptHash } from '../src/install.js';
 
 // Replies split in two writes: the client must reassemble them
 const h = useHarness({ splitReplies: true });
 
-test('ce_status reports the connection and SAFE mode', async () => {
+test('ce_status reports the connection, SAFE mode and whether CE runs the current plugin script', async () => {
+  h.ce.exec(`CEMCP = { scriptHash = ${pluginScriptHash()} }`);
   const { text, isError } = await h.call('ce_status');
   assert.match(text, /^Connected: Lua 5\.4 - CE 7\.7 \(PID: 0\) \[safe\]\nCE plugin:/);
   assert.equal(isError, false);
+  h.ce.exec('CEMCP.scriptHash = 12345');
+  assert.match((await h.call('ce_status')).text, /\nCheat Engine runs an older copy of the plugin script: restart Cheat Engine/);
+  h.ce.exec('CEMCP = nil');
+  assert.match((await h.call('ce_status')).text, /\nCE plugin not loaded in this Cheat Engine session/);
 });
 
 test('Cheat Engine older than 7.7 is refused with a clear message', async () => {
