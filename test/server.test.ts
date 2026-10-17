@@ -48,6 +48,18 @@ test('ce_lua without a process attached adds the nudge', async () => {
   assert.equal((await h.call('ce_lua', { code: 'return 5' })).text, '5\n[NUDGE: No process attached - be careful with memory operations]');
 });
 
+test('the unlock needs the user to click Yes in Cheat Engine, and names the anti-cheat', async () => {
+  h.ce.exec('__fake.dialogAnswer = mrNo');
+  const declined = await h.call('ce_safety_enable_writes', { confirm: 'USER_CONFIRMED' });
+  assert.equal(declined.text, 'BLOCKED: the user declined the unlock in Cheat Engine');
+  assert.equal(declined.isError, true);
+  assert.notEqual(h.ce.eval('_mcp_unsafe'), true);
+  h.ce.exec('__fake.dialogAnswer = mrYes; __fake.pid = 5555; _mcp.ac = { [5555] = "BattlEye" }');
+  assert.match((await h.call('ce_safety_enable_writes', { confirm: 'USER_CONFIRMED' })).text, /^UNSAFE mode enabled \(confirmed by the user in Cheat Engine\)/);
+  assert.match(String(h.ce.eval('__fake.dialogs[2]')), /ANTI-CHEAT DETECTED in game\.exe: BattlEye\.\nUsing Cheat Engine on this game can get your account banned/);
+  assert.equal(h.ce.eval('_mcp_unsafe'), true);
+});
+
 test('enable writes needs the confirmation token', async () => {
   const { text, isError } = await h.call('ce_safety_enable_writes');
   assert.match(text, /^BLOCKED: Use the \/unsafe-ce command/);

@@ -18,6 +18,10 @@ function openProcess(p) __fake.pid = type(p) == 'number' and p or 4242 return tr
 function print(...) local t = table.pack(...) for i = 1, t.n do t[i] = tostring(t[i]) end __fake.prints[#__fake.prints + 1] = table.concat(t, ' ') end
 function CEMCP_logCommand(tool, args) __fake.logs[#__fake.logs + 1] = tool .. ' ' .. tostring(args) end
 function updateMenuState() end
+-- Confirmation dialogs: the "user" answers __fake.dialogAnswer (Yes by default)
+mrYes, mrNo, mtWarning, mbYes, mbNo = 6, 7, 1, 4, 8
+__fake.dialogs = {}
+function messageDialog(title, text, ...) __fake.dialogs[#__fake.dialogs + 1] = text return __fake.dialogAnswer or mrYes end
 
 -- Simulated target: sparse byte memory, one module "game.exe" at 0x400000 (size 0x1000)
 __fake.mem = {}

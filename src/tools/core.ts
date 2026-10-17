@@ -110,8 +110,25 @@ Never enable unsafe mode proactively or without clear user consent.`,
     writes: false,
     async run({ confirm }, ctx) {
       if (confirm !== 'USER_CONFIRMED') return 'BLOCKED: Use the /unsafe-ce command to enable unsafe mode.';
-      await ctx.run(lua`_mcp_unsafe = true if updateMenuState then pcall(updateMenuState) end`);
-      return 'UNSAFE mode enabled: crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.';
+      // The token only proves the skill ran: the unlock itself needs a click in Cheat Engine,
+      // which Claude cannot do. The dialog is modal on CE's main thread, hence the long timeout.
+      const text = await ctx.run(
+        lua`
+          if _mcp_unsafe == true then _mcp_str = 'UNSAFE mode is already on' return end
+          local ac = (_mcp.ac or {})[getOpenedProcessID() or 0]
+          local warning = (ac and ac ~= '') and ('\n\nANTI-CHEAT DETECTED in ' .. tostring(process) .. ': ' .. ac ..
+            '.\nUsing Cheat Engine on this game can get your account banned.') or ''
+          local answer = messageDialog('CE MCP - unlock request',
+            'Claude Code asks to unlock the tools that can crash the game or Cheat Engine: Lua, code injection, ' ..
+            'breakpoints, DLL injection (speedhack, D3D, Mono), .CT tables, Mono static and instance access.' .. warning ..
+            '\n\nAllow it until Claude Code or Cheat Engine restarts?', mtWarning, mbYes, mbNo)
+          if answer ~= mrYes then _mcp_str = 'BLOCKED: the user declined the unlock in Cheat Engine' return end
+          _mcp_unsafe = true
+          if updateMenuState then pcall(updateMenuState) end
+          _mcp_str = 'UNSAFE mode enabled (confirmed by the user in Cheat Engine): crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.'`,
+        { timeoutMs: 180_000 },
+      );
+      return text ?? 'Error: no answer from Cheat Engine';
     },
   }),
 
