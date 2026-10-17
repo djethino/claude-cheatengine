@@ -12,8 +12,15 @@ const h = useHarness({ splitReplies: true });
 
 test('ce_status reports the connection and SAFE mode', async () => {
   const { text, isError } = await h.call('ce_status');
-  assert.equal(text, 'Connected: Lua 5.4 - CE 7.6 (PID: 0) [safe]');
+  assert.equal(text, 'Connected: Lua 5.4 - CE 7.7 (PID: 0) [safe]');
   assert.equal(isError, false);
+});
+
+test('Cheat Engine older than 7.7 is refused with a clear message', async () => {
+  h.ce.exec('__fake.ceVersion = 7.6');
+  const { text, isError } = await h.call('ce_status');
+  assert.match(text, /^Error: Cheat Engine 7\.7 or later is required \(this is CE 7\.6\)/);
+  assert.equal(isError, true);
 });
 
 test('ce_lua is locked in SAFE mode and reported as an error', async () => {

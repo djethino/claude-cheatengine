@@ -12,7 +12,7 @@ import { initLua, LuaVM, type LuaResult } from './lua-vm.js';
 
 const CE_STUBS = `
 __fake = { pid = 0, logs = {}, prints = {} }
-function getCEVersion() return 7.6 end
+function getCEVersion() return __fake.ceVersion or 7.7 end
 function getOpenedProcessID() return __fake.pid end
 function openProcess(p) __fake.pid = type(p) == 'number' and p or 4242 return true end
 function print(...) local t = table.pack(...) for i = 1, t.n do t[i] = tostring(t[i]) end __fake.prints[#__fake.prints + 1] = table.concat(t, ' ') end

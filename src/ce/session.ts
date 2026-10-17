@@ -30,6 +30,8 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** Lua global holding the full text of the last truncated output, read back by ce_output_more. */
 const MORE_VAR = '_mcp_more';
+/** getCEVersion() * 100: 7.7 brought memscan FoundCount, ErrorString and Results, used by the scan tools. */
+const MIN_CE_VERSION = 770;
 /** Another server whose last call is older than this has stopped: its claim on CE lapses. */
 const OWNER_LAPSE_S = 60;
 
@@ -137,8 +139,14 @@ export class Session {
     const init = lua`
       _mcp_server = { owner = ${this.owner}, version = ${this.version}, resetSafe = ${this.firstConnection}, lapse = ${OWNER_LAPSE_S} }
       ${raw(prelude)}
-      return 1`;
-    await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS);
+      return math.floor(getCEVersion() * 100 + 0.5)`;
+    const ceVersion = Number(await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS));
+    if (ceVersion < MIN_CE_VERSION) {
+      this.pipe.close();
+      throw new CEPipeError(
+        `Cheat Engine ${MIN_CE_VERSION / 100} or later is required (this is CE ${ceVersion / 100}): update it from https://www.cheatengine.org`,
+      );
+    }
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
     this.moreTotal = 0;
