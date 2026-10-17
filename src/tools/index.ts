@@ -5,8 +5,9 @@ import { jobTools } from './jobs.js';
 import { scanTools } from './scan.js';
 import { tableTools } from './table.js';
 import { codeTools } from './code.js';
+import { monoTools } from './mono.js';
 
-export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...jobTools];
+export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...jobTools];
 
 const names = new Set<string>();
 for (const tool of allTools) {

@@ -13,7 +13,8 @@ let stopping = false;
 async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
-  await session.release();
+  // A tool call stuck on CE must not keep the process alive: give the release 3 s at most
+  await Promise.race([session.release(), new Promise((resolve) => setTimeout(resolve, 3000))]);
   process.exit(0);
 }
 

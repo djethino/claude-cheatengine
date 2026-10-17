@@ -121,7 +121,9 @@ export class Session {
    * until the owner claim lapses. Best effort: CE may already be gone.
    */
   async release(): Promise<void> {
-    if (!this.pipe.connected) return;
+    // Nothing to give back if this server never set CE up
+    if (this.readyConnection === -1 && !this.pipe.connected) return;
+    // Reconnects if needed: after a timeout the connection is gone but the claim is still in CE
     const release = await this.mutex.acquire();
     try {
       await this.pipe.exec(lua`if _mcp_owner == ${this.owner} then _mcp_owner = nil end return 1`.code, 2000);
