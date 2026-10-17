@@ -300,52 +300,6 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
   }),
 
   defineTool({
-    name: 'ce_aob_scan',
-    description: `Scan memory for an array of bytes pattern (paginated).
-
-The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
-    schema: {
-      pattern: z.string().describe("Byte pattern with wildcards, e.g. '89 45 ?? 8B 4D'"),
-      module: z.string().default('').describe('Only keep results inside this module (e.g. "game.exe")'),
-      protection: z
-        .string()
-        .regex(/^[+\-*XWC]*$/)
-        .default('')
-        .describe('CE protection flags: X executable, W writable, C copy-on-write; + required, - excluded. "+X-C-W" = code only. Default: all memory'),
-      offset: pageSchema(50).offset,
-      limit: pageSchema(50).limit,
-    },
-    writes: false,
-    requiresProcess: true,
-    async run({ pattern, module, protection, offset, limit }, ctx) {
-      const tokens = pattern.trim().split(/\s+/);
-      if (!tokens.every((t) => /^([0-9a-f]{2}|\?\??)$/i.test(t))) {
-        return `Error: invalid pattern "${pattern}": expected hex bytes and ?? wildcards separated by spaces`;
-      }
-      const moduleFilter = module
-        ? lua`
-          local base = getAddressSafe(${module})
-          local size = base and getModuleSize(${module})
-          if not base or not size then _mcp_str = 'Error: module not found: ' .. ${module} return end
-          inRange = function(a) return a >= base and a < base + size end`
-        : lua`inRange = function() return true end`;
-      const collect = lua`
-        local inRange
-        ${moduleFilter}
-        local results = AOBScan(${tokens.join(' ')}, ${protection})
-        if results then
-          for i = 0, results.Count - 1 do
-            local a = tonumber(results[i], 16)
-            if a and inRange(a) then items[#items + 1] = string.format('0x%X  %s', a, getNameFromAddress(a)) end
-          end
-          results.destroy()
-        end`;
-      const text = await ctx.run(listBody(collect, 'AOB matches', { filter: '', offset, limit }), { timeoutMs: 300_000 });
-      return text ?? 'No AOB matches';
-    },
-  }),
-
-  defineTool({
     name: 'ce_resolve_address',
     description: "Resolve a symbol or pointer chain to an address (e.g. 'game.exe+0x1234' or '[[base]+0x10]+0x4').",
     schema: {

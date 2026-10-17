@@ -85,15 +85,16 @@ test('ce_value_change: integer and float deltas', async () => {
   assert.equal((await h.call('ce_value_change', { address: '0x400058', delta: '0.25', type: 'float' })).text, 'Changed 0x400058 (float): 1.5 -> 1.75');
 });
 
-test('ce_aob_scan: pattern checked, module filter by address range, paginated', async () => {
+test('ce_aob_scan: pattern checked, wildcards, module range, results as a named scan', async () => {
   h.ce.exec('__fake.pid = 7');
   assert.match((await h.call('ce_aob_scan', { pattern: "90 ')" })).text, /^Error: invalid pattern/);
+  await h.call('ce_write_memory', { address: '0x400010', type: 'bytes', value: '89 45 10 8B' });
+  await h.call('ce_write_memory', { address: '0x400020', type: 'bytes', value: '89 45 FF 8B' });
   assert.equal(
     (await h.call('ce_aob_scan', { pattern: '89 45 ?? 8b', module: 'game.exe' })).text,
-    'AOB matches 1-2 of 2\n0x400010  game.exe+10\n0x400020  game.exe+20',
+    'AOB scan "aob" in game.exe complete: 2 matches\n  0x00400010 = 89 45 ?? 8B\n  0x00400020 = 89 45 ?? 8B',
   );
-  assert.equal(h.ce.eval('__fake.lastAob.pattern'), '89 45 ?? 8b');
-  assert.match((await h.call('ce_aob_scan', { pattern: '90', limit: 1 })).text, /^AOB matches 1-1 of 3\n.*\n\.\.\. 2 more, next page: offset=1$/);
+  assert.match((await h.call('ce_scan_results', { scan_name: 'aob', offset: 1 })).text, /^results 2-2 of 2\n\[1\] 0x00400020/);
   assert.equal((await h.call('ce_aob_scan', { pattern: '90', module: 'nope.dll' })).text, 'Error: module not found: nope.dll');
 });
 

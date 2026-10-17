@@ -9,6 +9,9 @@
 
 import { createServer, type Server, type Socket } from 'net';
 import { initLua, LuaVM, type LuaResult } from './lua-vm.js';
+import memscanStub from './fake/memscan.lua';
+import addressListStub from './fake/addresslist.lua';
+import monoStub from './fake/mono.lua';
 
 const CE_STUBS = `
 __fake = { pid = 0, logs = {}, prints = {} }
@@ -128,10 +131,6 @@ function createTimer() return { Interval = 1000, Enabled = true } end
 local function control() return { destroy = function() __fake.windows = (__fake.windows or 1) - 1 end, show = function() __fake.windows = (__fake.windows or 0) + 1 end } end
 function createForm() return control() end
 createLabel, createProgressBar, createButton = control, control, control
-function AOBScan(pattern, prot)
-  __fake.lastAob = { pattern = pattern, prot = prot }
-  return stringlist({ '400010', '400020', '800010' })
-end
 `;
 
 // lua_tointeger() of the script's result, as a decimal string (exact on 64 bits)
@@ -178,6 +177,7 @@ export class FakeCE {
     this.vm?.close();
     this.vm = new LuaVM();
     this.vm.run(CE_STUBS);
+    for (const stub of [memscanStub, addressListStub, monoStub]) this.vm.run(stub);
   }
 
   /** Evaluate a Lua expression in the fake CE's state (test assertions). */
