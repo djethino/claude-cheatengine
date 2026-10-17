@@ -13623,6 +13623,21 @@ var Session = class {
   close() {
     this.pipe.close();
   }
+  /**
+   * Give CE up when the server stops, so the next session (or a restarted one) is not refused
+   * until the owner claim lapses. Best effort: CE may already be gone.
+   */
+  async release() {
+    if (!this.pipe.connected) return;
+    const release = await this.mutex.acquire();
+    try {
+      await this.pipe.exec(lua`if _mcp_owner == ${this.owner} then _mcp_owner = nil end return 1`.code, 2e3);
+    } catch {
+    } finally {
+      release();
+      this.pipe.close();
+    }
+  }
   /** First script of every connection: claim CE, reset SAFE once, install the helpers. */
   async ensureReady() {
     if (this.pipe.connected && this.pipe.connectionId === this.readyConnection) return;
@@ -22643,9 +22658,15 @@ for (const tool of allTools) {
 // src/index.ts
 var session = new Session(PIPE_PATH, "0.4.0");
 var server = createServer(session, allTools, "0.4.0");
-process.on("SIGINT", () => {
-  session.close();
+var stopping = false;
+async function stop() {
+  if (stopping) return;
+  stopping = true;
+  await session.release();
   process.exit(0);
-});
+}
+process.stdin.on("end", () => void stop());
+process.on("SIGINT", () => void stop());
+process.on("SIGTERM", () => void stop());
 await server.connect(new StdioServerTransport());
 logger.info(`asymptomatik-cheatengine ${"0.4.0"} ready (${allTools.length} tools)`);

@@ -114,6 +114,23 @@ export class Session {
     this.pipe.close();
   }
 
+  /**
+   * Give CE up when the server stops, so the next session (or a restarted one) is not refused
+   * until the owner claim lapses. Best effort: CE may already be gone.
+   */
+  async release(): Promise<void> {
+    if (!this.pipe.connected) return;
+    const release = await this.mutex.acquire();
+    try {
+      await this.pipe.exec(lua`if _mcp_owner == ${this.owner} then _mcp_owner = nil end return 1`.code, 2000);
+    } catch {
+      // Exiting anyway: nothing to report to
+    } finally {
+      release();
+      this.pipe.close();
+    }
+  }
+
   /** First script of every connection: claim CE, reset SAFE once, install the helpers. */
   private async ensureReady(): Promise<void> {
     if (this.pipe.connected && this.pipe.connectionId === this.readyConnection) return;
