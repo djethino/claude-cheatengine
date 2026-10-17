@@ -68,11 +68,14 @@ async function waitForJob(ctx: ToolContext, id: number, kind: string): Promise<s
 }
 
 /**
- * Start a job. `spec` is a Lua table constructor for _mcp.startJob (kind, run, update, finish,
- * window). The start goes through the tool's gates like any other CE call.
+ * Start a job. `spec` is a Lua expression giving the table for _mcp.startJob (kind, run, update,
+ * finish, window), or nil after setting _mcp_str to report why it cannot start. The start goes
+ * through the tool's gates like any other CE call.
  */
 export async function runJob(ctx: ToolContext, kind: string, spec: LuaCode, wait: boolean): Promise<string> {
-  const started = await ctx.run(lua`_mcp_str = tostring(_mcp.startJob(${spec}).id)`);
+  const started = await ctx.run(lua`
+    local spec = ${spec}
+    if spec then _mcp_str = tostring(_mcp.startJob(spec).id) end`);
   const id = Number(started);
   if (!started || !Number.isInteger(id)) return started ?? 'Error: the job did not start';
   if (!wait) return `Job ${id} started (${kind}). Call ce_job_status(job_id=${id}) to get its progress and result.`;

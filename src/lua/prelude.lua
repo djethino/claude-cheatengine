@@ -18,8 +18,29 @@ if _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_se
   end
 end
 
--- Kept across reconnections of the same CE session (running jobs survive a server restart)
-_mcp = _mcp or {}
+-- Kept across reconnections of the same CE session (running jobs survive a server restart).
+-- STATE is the format of what _mcp holds: bump it whenever that format changes, so the state left
+-- in CE by an older server version is discarded instead of being misread.
+local STATE = 2
+if _mcp and _mcp.state ~= STATE then
+  for _, s in pairs(_mcp.scans or {}) do
+    pcall(function()
+      if type(s) == 'table' and s.ms then
+        if s.fl then s.fl.destroy() end
+        s.ms.destroy()
+      else
+        s.destroy()
+      end
+    end)
+  end
+  for _, job in pairs(_mcp.jobs or {}) do
+    job.cancelled = true
+    if job.form then pcall(job.form.destroy) end
+  end
+  if _mcp.jobTimer then pcall(_mcp.jobTimer.destroy) end
+  _mcp = nil
+end
+_mcp = _mcp or { state = STATE }
 _mcp.version = server.version
 _mcp.jobs = _mcp.jobs or {}
 _mcp.nextJob = _mcp.nextJob or 0
@@ -130,6 +151,39 @@ function _mcp.cancelJob(id)
   local job = _mcp.jobs[id]
   if job and (job.status == 'running' or job.status == 'finishing') then job.cancelled = true end
   return job
+end
+
+--------------------------------------------------------------------------------
+-- Named scans (src/tools/scan.ts): _mcp.scans[name] = { ms = memscan, fl = foundlist, ready = bool }
+-- One FoundList per memscan, kept for the scan's life: destroying a FoundList leaves the memscan
+-- pointing at it, and the next nextScan() aborts the whole script without any Lua error (seen on
+-- CE 7.7). It is deinitialized while a scan runs and initialized again once it is done.
+--------------------------------------------------------------------------------
+_mcp.scans = _mcp.scans or {}
+
+function _mcp.dropScan(name)
+  local s = _mcp.scans[name]
+  if not s then return false end
+  _mcp.scans[name] = nil
+  if s.fl then
+    if s.ready then pcall(s.fl.deinitialize) end
+    s.fl.destroy()
+  end
+  s.ms.destroy()
+  return true
+end
+
+-- Before a next scan: release the results file the FoundList holds open
+function _mcp.scanBegin(s)
+  if s.ready then s.fl.deinitialize() end
+  s.ready = false
+end
+
+-- After a scan: open its results for reading
+function _mcp.scanEnd(s)
+  s.fl = s.fl or createFoundList(s.ms)
+  s.fl.initialize()
+  s.ready = true
 end
 
 -- One-line status for the MCP server: status|done|total|message

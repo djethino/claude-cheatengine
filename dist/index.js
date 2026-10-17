@@ -13560,7 +13560,7 @@ function lua(strings, ...values) {
 }
 
 // src/lua/prelude.lua
-var prelude_default = "-- First script of every connection from the MCP server (src/ce/session.ts), run in CE's Lua state.\n-- _mcp_server = { owner, version, resetSafe, lapse } is set just before this code.\n--\n-- Helpers live here rather than in the CE plugin (ce-plugin/ce-mcp-server.lua): the plugin is\n-- only loaded when CE starts, so a CE launched before a plugin update would lack new helpers.\n\nlocal server = _mcp_server\n_mcp_server = nil\n\n-- Claim CE unless another server is still using it (its last call is recent)\nif _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_seen or 0) > server.lapse then\n  _mcp_owner = server.owner\n  _mcp_owner_seen = os.time()\n  -- SAFE mode is on whenever a server starts: an earlier session's unlock does not carry over\n  if server.resetSafe then\n    _mcp_unsafe = false\n    if updateMenuState then pcall(updateMenuState) end\n  end\nend\n\n-- Kept across reconnections of the same CE session (running jobs survive a server restart)\n_mcp = _mcp or {}\n_mcp.version = server.version\n_mcp.jobs = _mcp.jobs or {}\n_mcp.nextJob = _mcp.nextJob or 0\n\n--------------------------------------------------------------------------------\n-- Jobs: long operations run without blocking CE's main thread.\n--\n-- spec = {\n--   kind = 'pointer scan',             -- shown in the progress window and job status\n--   run = function(job, thread) end,    -- optional, runs in a CE thread; check job.cancelled\n--   update = function(job) end,         -- optional, main thread: refresh job.done/total/message\n--   finish = function(job) return 'result text' end,  -- main thread, once run has returned\n--   window = true,                      -- show a progress window with a Cancel button\n-- }\n-- job.status: running -> finishing -> done | cancelled | error\n--------------------------------------------------------------------------------\n\nlocal function closeWindow(job)\n  if job.form then\n    pcall(function() job.form.destroy() end)\n    job.form = nil\n  end\nend\n\nlocal function openWindow(job)\n  local form = createForm(false)\n  form.Caption = 'CE MCP - ' .. job.kind\n  form.Width, form.Height = 360, 110\n  form.Position = 'poScreenCenter'\n  form.BorderStyle = 'bsSingle'\n  local label = createLabel(form)\n  label.Left, label.Top = 12, 10\n  label.Caption = job.kind .. '...'\n  local bar = createProgressBar(form)\n  bar.Left, bar.Top, bar.Width, bar.Height = 12, 32, 336, 18\n  bar.Max = 1000\n  local cancel = createButton(form)\n  cancel.Caption = 'Cancel'\n  cancel.Left, cancel.Top, cancel.Width = 274, 60, 75\n  cancel.OnClick = function() _mcp.cancelJob(job.id) end\n  form.OnClose = function() _mcp.cancelJob(job.id) return caHide end\n  form.show()\n  job.form, job.label, job.bar = form, label, bar\nend\n\nlocal function refreshWindow(job)\n  if not job.form then return end\n  local text = job.message ~= '' and job.message or (job.kind .. '...')\n  if job.total and job.total > 0 then\n    job.bar.Position = math.floor(1000 * math.min(job.done, job.total) / job.total)\n    text = string.format('%s (%d%%)', text, math.floor(100 * math.min(job.done, job.total) / job.total))\n  end\n  job.label.Caption = text\nend\n\n-- Main-thread step of a job: progress refresh, then finish once its thread has returned\nfunction _mcp.stepJob(job)\n  if job.status ~= 'running' and job.status ~= 'finishing' then return end\n  if job.spec.update then\n    local ok, err = pcall(job.spec.update, job)\n    if not ok then job.status, job.error = 'error', tostring(err) end\n  end\n  if job.status == 'finishing' then\n    if job.cancelled then\n      job.status = 'cancelled'\n    else\n      local ok, result = pcall(job.spec.finish, job)\n      if ok then job.status, job.result = 'done', tostring(result) else job.status, job.error = 'error', tostring(result) end\n    end\n  end\n  if job.status == 'running' or job.status == 'finishing' then refreshWindow(job) else closeWindow(job) end\nend\n\nfunction _mcp.startJob(spec)\n  _mcp.nextJob = _mcp.nextJob + 1\n  local job = { id = _mcp.nextJob, kind = spec.kind, spec = spec, status = 'running', done = 0, total = nil,\n                message = '', cancelled = false, started = os.time() }\n  _mcp.jobs[job.id] = job\n  if spec.window then openWindow(job) end\n  if spec.run then\n    createThread(function(thread)\n      thread.Name = 'CE MCP ' .. spec.kind\n      local ok, err = pcall(spec.run, job, thread)\n      if not ok and job.status == 'running' then job.status, job.error = 'error', tostring(err) end\n      if job.status == 'running' then job.status = 'finishing' end\n    end)\n  else\n    job.status = 'finishing'\n  end\n  -- A timer keeps windows and finished jobs moving even when no MCP call polls them\n  if not _mcp.jobTimer then\n    _mcp.jobTimer = createTimer()\n    _mcp.jobTimer.Interval = 200\n    _mcp.jobTimer.OnTimer = function()\n      local active = false\n      for _, j in pairs(_mcp.jobs) do\n        _mcp.stepJob(j)\n        if j.status == 'running' or j.status == 'finishing' then active = true end\n      end\n      if not active then _mcp.jobTimer.Enabled = false end\n    end\n  end\n  _mcp.jobTimer.Enabled = true\n  return job\nend\n\nfunction _mcp.cancelJob(id)\n  local job = _mcp.jobs[id]\n  if job and (job.status == 'running' or job.status == 'finishing') then job.cancelled = true end\n  return job\nend\n\n-- One-line status for the MCP server: status|done|total|message\nfunction _mcp.jobLine(id)\n  local job = _mcp.jobs[id]\n  if not job then return 'missing|0|0|' end\n  _mcp.stepJob(job)\n  local message = (job.error or job.message or ''):gsub('[\\r\\n|]', ' ')\n  return string.format('%s|%d|%d|%s', job.status, math.floor(job.done or 0), math.floor(job.total or 0), message)\nend\n\nprint(string.format('[CE-MCP] asymptomatik-cheatengine %s connected - Mode: %s', server.version, _mcp_unsafe and 'UNSAFE' or 'SAFE'))\n";
+var prelude_default = "-- First script of every connection from the MCP server (src/ce/session.ts), run in CE's Lua state.\n-- _mcp_server = { owner, version, resetSafe, lapse } is set just before this code.\n--\n-- Helpers live here rather than in the CE plugin (ce-plugin/ce-mcp-server.lua): the plugin is\n-- only loaded when CE starts, so a CE launched before a plugin update would lack new helpers.\n\nlocal server = _mcp_server\n_mcp_server = nil\n\n-- Claim CE unless another server is still using it (its last call is recent)\nif _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_seen or 0) > server.lapse then\n  _mcp_owner = server.owner\n  _mcp_owner_seen = os.time()\n  -- SAFE mode is on whenever a server starts: an earlier session's unlock does not carry over\n  if server.resetSafe then\n    _mcp_unsafe = false\n    if updateMenuState then pcall(updateMenuState) end\n  end\nend\n\n-- Kept across reconnections of the same CE session (running jobs survive a server restart).\n-- STATE is the format of what _mcp holds: bump it whenever that format changes, so the state left\n-- in CE by an older server version is discarded instead of being misread.\nlocal STATE = 2\nif _mcp and _mcp.state ~= STATE then\n  for _, s in pairs(_mcp.scans or {}) do\n    pcall(function()\n      if type(s) == 'table' and s.ms then\n        if s.fl then s.fl.destroy() end\n        s.ms.destroy()\n      else\n        s.destroy()\n      end\n    end)\n  end\n  for _, job in pairs(_mcp.jobs or {}) do\n    job.cancelled = true\n    if job.form then pcall(job.form.destroy) end\n  end\n  if _mcp.jobTimer then pcall(_mcp.jobTimer.destroy) end\n  _mcp = nil\nend\n_mcp = _mcp or { state = STATE }\n_mcp.version = server.version\n_mcp.jobs = _mcp.jobs or {}\n_mcp.nextJob = _mcp.nextJob or 0\n\n--------------------------------------------------------------------------------\n-- Jobs: long operations run without blocking CE's main thread.\n--\n-- spec = {\n--   kind = 'pointer scan',             -- shown in the progress window and job status\n--   run = function(job, thread) end,    -- optional, runs in a CE thread; check job.cancelled\n--   update = function(job) end,         -- optional, main thread: refresh job.done/total/message\n--   finish = function(job) return 'result text' end,  -- main thread, once run has returned\n--   window = true,                      -- show a progress window with a Cancel button\n-- }\n-- job.status: running -> finishing -> done | cancelled | error\n--------------------------------------------------------------------------------\n\nlocal function closeWindow(job)\n  if job.form then\n    pcall(function() job.form.destroy() end)\n    job.form = nil\n  end\nend\n\nlocal function openWindow(job)\n  local form = createForm(false)\n  form.Caption = 'CE MCP - ' .. job.kind\n  form.Width, form.Height = 360, 110\n  form.Position = 'poScreenCenter'\n  form.BorderStyle = 'bsSingle'\n  local label = createLabel(form)\n  label.Left, label.Top = 12, 10\n  label.Caption = job.kind .. '...'\n  local bar = createProgressBar(form)\n  bar.Left, bar.Top, bar.Width, bar.Height = 12, 32, 336, 18\n  bar.Max = 1000\n  local cancel = createButton(form)\n  cancel.Caption = 'Cancel'\n  cancel.Left, cancel.Top, cancel.Width = 274, 60, 75\n  cancel.OnClick = function() _mcp.cancelJob(job.id) end\n  form.OnClose = function() _mcp.cancelJob(job.id) return caHide end\n  form.show()\n  job.form, job.label, job.bar = form, label, bar\nend\n\nlocal function refreshWindow(job)\n  if not job.form then return end\n  local text = job.message ~= '' and job.message or (job.kind .. '...')\n  if job.total and job.total > 0 then\n    job.bar.Position = math.floor(1000 * math.min(job.done, job.total) / job.total)\n    text = string.format('%s (%d%%)', text, math.floor(100 * math.min(job.done, job.total) / job.total))\n  end\n  job.label.Caption = text\nend\n\n-- Main-thread step of a job: progress refresh, then finish once its thread has returned\nfunction _mcp.stepJob(job)\n  if job.status ~= 'running' and job.status ~= 'finishing' then return end\n  if job.spec.update then\n    local ok, err = pcall(job.spec.update, job)\n    if not ok then job.status, job.error = 'error', tostring(err) end\n  end\n  if job.status == 'finishing' then\n    if job.cancelled then\n      job.status = 'cancelled'\n    else\n      local ok, result = pcall(job.spec.finish, job)\n      if ok then job.status, job.result = 'done', tostring(result) else job.status, job.error = 'error', tostring(result) end\n    end\n  end\n  if job.status == 'running' or job.status == 'finishing' then refreshWindow(job) else closeWindow(job) end\nend\n\nfunction _mcp.startJob(spec)\n  _mcp.nextJob = _mcp.nextJob + 1\n  local job = { id = _mcp.nextJob, kind = spec.kind, spec = spec, status = 'running', done = 0, total = nil,\n                message = '', cancelled = false, started = os.time() }\n  _mcp.jobs[job.id] = job\n  if spec.window then openWindow(job) end\n  if spec.run then\n    createThread(function(thread)\n      thread.Name = 'CE MCP ' .. spec.kind\n      local ok, err = pcall(spec.run, job, thread)\n      if not ok and job.status == 'running' then job.status, job.error = 'error', tostring(err) end\n      if job.status == 'running' then job.status = 'finishing' end\n    end)\n  else\n    job.status = 'finishing'\n  end\n  -- A timer keeps windows and finished jobs moving even when no MCP call polls them\n  if not _mcp.jobTimer then\n    _mcp.jobTimer = createTimer()\n    _mcp.jobTimer.Interval = 200\n    _mcp.jobTimer.OnTimer = function()\n      local active = false\n      for _, j in pairs(_mcp.jobs) do\n        _mcp.stepJob(j)\n        if j.status == 'running' or j.status == 'finishing' then active = true end\n      end\n      if not active then _mcp.jobTimer.Enabled = false end\n    end\n  end\n  _mcp.jobTimer.Enabled = true\n  return job\nend\n\nfunction _mcp.cancelJob(id)\n  local job = _mcp.jobs[id]\n  if job and (job.status == 'running' or job.status == 'finishing') then job.cancelled = true end\n  return job\nend\n\n--------------------------------------------------------------------------------\n-- Named scans (src/tools/scan.ts): _mcp.scans[name] = { ms = memscan, fl = foundlist, ready = bool }\n-- One FoundList per memscan, kept for the scan's life: destroying a FoundList leaves the memscan\n-- pointing at it, and the next nextScan() aborts the whole script without any Lua error (seen on\n-- CE 7.7). It is deinitialized while a scan runs and initialized again once it is done.\n--------------------------------------------------------------------------------\n_mcp.scans = _mcp.scans or {}\n\nfunction _mcp.dropScan(name)\n  local s = _mcp.scans[name]\n  if not s then return false end\n  _mcp.scans[name] = nil\n  if s.fl then\n    if s.ready then pcall(s.fl.deinitialize) end\n    s.fl.destroy()\n  end\n  s.ms.destroy()\n  return true\nend\n\n-- Before a next scan: release the results file the FoundList holds open\nfunction _mcp.scanBegin(s)\n  if s.ready then s.fl.deinitialize() end\n  s.ready = false\nend\n\n-- After a scan: open its results for reading\nfunction _mcp.scanEnd(s)\n  s.fl = s.fl or createFoundList(s.ms)\n  s.fl.initialize()\n  s.ready = true\nend\n\n-- One-line status for the MCP server: status|done|total|message\nfunction _mcp.jobLine(id)\n  local job = _mcp.jobs[id]\n  if not job then return 'missing|0|0|' end\n  _mcp.stepJob(job)\n  local message = (job.error or job.message or ''):gsub('[\\r\\n|]', ' ')\n  return string.format('%s|%d|%d|%s', job.status, math.floor(job.done or 0), math.floor(job.total or 0), message)\nend\n\nprint(string.format('[CE-MCP] asymptomatik-cheatengine %s connected - Mode: %s', server.version, _mcp_unsafe and 'UNSAFE' or 'SAFE'))\n";
 
 // src/ce/session.ts
 var PIPE_PATH = "\\\\.\\pipe\\ce-mcp";
@@ -13568,6 +13568,7 @@ var DEFAULT_MAX_BYTES = 1e4;
 var MAX_OUTPUT_BYTES = 1e5;
 var DEFAULT_TIMEOUT_MS = 1e4;
 var MORE_VAR = "_mcp_more";
+var MIN_CE_VERSION = 770;
 var OWNER_LAPSE_S = 60;
 var MARK_OWNER = "OWNER";
 var MARK_INIT = "INIT";
@@ -13644,8 +13645,14 @@ var Session = class {
     const init = lua`
       _mcp_server = { owner = ${this.owner}, version = ${this.version}, resetSafe = ${this.firstConnection}, lapse = ${OWNER_LAPSE_S} }
       ${raw(prelude_default)}
-      return 1`;
-    await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS);
+      return math.floor(getCEVersion() * 100 + 0.5)`;
+    const ceVersion = Number(await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS));
+    if (ceVersion < MIN_CE_VERSION) {
+      this.pipe.close();
+      throw new CEPipeError(
+        `Cheat Engine ${MIN_CE_VERSION / 100} or later is required (this is CE ${ceVersion / 100}): update it from https://www.cheatengine.org`
+      );
+    }
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
     this.moreTotal = 0;
@@ -22591,6 +22598,15 @@ async function waitForJob(ctx, id, kind) {
     await ctx.scope.pause(POLL_MS);
   }
 }
+async function runJob(ctx, kind, spec, wait) {
+  const started = await ctx.run(lua`
+    local spec = ${spec}
+    if spec then _mcp_str = tostring(_mcp.startJob(spec).id) end`);
+  const id = Number(started);
+  if (!started || !Number.isInteger(id)) return started ?? "Error: the job did not start";
+  if (!wait) return `Job ${id} started (${kind}). Call ce_job_status(job_id=${id}) to get its progress and result.`;
+  return waitForJob(ctx, id, kind);
+}
 var jobTools = [
   defineTool({
     name: "ce_job_status",
@@ -22647,8 +22663,329 @@ var jobTools = [
   })
 ];
 
+// src/tools/scan.ts
+var VAR_TYPES = {
+  byte: "vtByte",
+  int16: "vtWord",
+  int32: "vtDword",
+  int64: "vtQword",
+  float: "vtSingle",
+  double: "vtDouble",
+  string: "vtString",
+  aob: "vtByteArray",
+  binary: "vtBinary",
+  all: "vtAll"
+};
+var RECORD_TYPES = { ...VAR_TYPES, aob: "vtByteArray", all: "vtDword" };
+var FIRST_SCAN_TYPES = {
+  exact: "soExactValue",
+  greater: "soBiggerThan",
+  less: "soSmallerThan",
+  between: "soValueBetween",
+  unknown: "soUnknownValue"
+};
+var NEXT_SCAN_TYPES = {
+  exact: "soExactValue",
+  greater: "soBiggerThan",
+  less: "soSmallerThan",
+  between: "soValueBetween",
+  increased: "soIncreasedValue",
+  increased_by: "soIncreasedValueBy",
+  decreased: "soDecreasedValue",
+  decreased_by: "soDecreasedValueBy",
+  changed: "soChanged",
+  unchanged: "soUnchanged"
+};
+var NO_VALUE = /* @__PURE__ */ new Set(["unknown", "increased", "decreased", "changed", "unchanged"]);
+var scanName = external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("main").describe('Name of the scan, to run several scans side by side (default "main")');
+function existingScan(name, ready = false) {
+  return lua`
+    local s = _mcp.scans[${name}]
+    if not s then _mcp_str = 'Error: no scan named ' .. ${name} .. ': start one with ce_scan_value' return end
+    if ${ready} and not s.ready then _mcp_str = 'Error: scan ' .. ${name} .. ' is still running (see ce_job_list)' return end
+    local ms = s.ms`;
+}
+function scanJob(kind, name, first, summary) {
+  return lua`{
+    kind = ${kind}, window = true,
+    run = function(job) ms.waitTillDone() end,
+    update = function(job)
+      local p = ms.getProgress()
+      if p and p.TotalAddressesToScan and p.TotalAddressesToScan > 0 then
+        job.total, job.done = p.TotalAddressesToScan, p.CurrentlyScanned
+        job.message = string.format('%s: %d found', ${kind}, p.ResultsFound or 0)
+      end
+    end,
+    finish = function(job)
+      if ms.ErrorString and ms.ErrorString ~= '' then
+        local err = ms.ErrorString
+        if ${first} then _mcp.dropScan(${name}) else pcall(_mcp.scanEnd, s) end
+        error('scan error: ' .. err, 0)
+      end
+      _mcp.scanEnd(s)
+      local count = ms.FoundCount
+      local lines = { string.format(${summary}, count) }
+      if count > 0 and count <= 10 then
+        for i = 0, s.fl.Count - 1 do lines[#lines + 1] = string.format('  0x%s = %s', s.fl.Address[i], s.fl.Value[i]) end
+      elseif count > 10 then
+        lines[#lines + 1] = 'Refine with ce_scan_next, or list them with ce_scan_results'
+      end
+      return table.concat(lines, '\n')
+    end,
+  }`;
+}
+var scanTools = [
+  defineTool({
+    name: "ce_scan_value",
+    description: `Start a new memory scan for a value. This is the first step in finding memory addresses.
+
+RECOMMENDED FIRST APPROACH: Use this before trying ce_mono_* functions.
+For finding game values (health, gold, ammo, strings), scanning is simpler than
+reverse engineering class structures.
+
+The scan runs in the background (CE shows its progress); up to 10 results are listed directly.
+Then: change the value in the game and refine with ce_scan_next.
+
+ERROR HANDLING:
+- If scan hangs or returns no results after 2-3 attempts, STOP and ask user
+- CE may have a popup blocking (check CE window)`,
+    schema: {
+      value: external_exports.string().default("").describe("Value to search for, e.g. '100' or '3.14' (not needed for scan_type 'unknown')"),
+      value_type: external_exports.enum(Object.keys(VAR_TYPES)).default("int32").describe("Value type; 'all' = int32, float and double at once"),
+      scan_type: external_exports.enum(Object.keys(FIRST_SCAN_TYPES)).default("exact").describe("'unknown' takes a snapshot of every value, to refine with changed/increased/... later"),
+      value2: external_exports.string().default("").describe("Upper bound for scan_type 'between'"),
+      hexadecimal: external_exports.boolean().default(false).describe("The value is hexadecimal"),
+      start_address: external_exports.string().default("").describe("Only scan from this address (default: everything)"),
+      stop_address: external_exports.string().default("").describe("Only scan up to this address"),
+      writable: external_exports.enum(["yes", "no", "any"]).default("yes").describe("Writable memory only (yes, default), excluded (no) or both (any)"),
+      executable: external_exports.enum(["yes", "no", "any"]).default("any").describe("Executable memory"),
+      copy_on_write: external_exports.enum(["yes", "no", "any"]).default("no").describe("Copy-on-write memory"),
+      alignment: external_exports.number().int().min(0).max(64).default(4).describe("Only addresses that are a multiple of this (fast scan); 0 or 1 = every address"),
+      scan_name: scanName,
+      ...waitSchema
+    },
+    writes: false,
+    requiresProcess: true,
+    async run(args, ctx) {
+      const { value, value_type, scan_type, value2, hexadecimal, start_address, stop_address, scan_name, wait } = args;
+      if (!NO_VALUE.has(scan_type) && !value.trim()) return `Error: scan_type '${scan_type}' needs a value`;
+      if (scan_type === "between" && !value2.trim()) return "Error: scan_type 'between' needs value2";
+      const pref = { yes: "scanInclude", no: "scanExclude", any: "scanDontCare" };
+      const aligned = args.alignment > 1;
+      const kind = `${scan_type} ${value_type} scan`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          if _mcp.scans[${scan_name}] and not _mcp.scans[${scan_name}].ready then
+            _mcp_str = 'Error: scan ' .. ${scan_name} .. ' is still running (see ce_job_list)' return
+          end
+          _mcp.dropScan(${scan_name})
+          local function addressOf(text, default)
+            if text == '' then return default end
+            local a = getAddressSafe(text)
+            if not a then error('invalid address: ' .. text, 0) end
+            return a
+          end
+          local ms = createMemScan()
+          ms.VarType = ${VAR_TYPES[value_type]}
+          ms.ScanOption = ${FIRST_SCAN_TYPES[scan_type]}
+          ms.Scanvalue1 = ${value}
+          ms.Scanvalue2 = ${value2}
+          ms.Hexadecimal = ${hexadecimal}
+          ms.Startaddress = addressOf(${start_address}, 0)
+          ms.Stopaddress = addressOf(${stop_address}, targetIs64Bit() and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF)
+          ms.ScanWritable = ${pref[args.writable]}
+          ms.ScanExecutable = ${pref[args.executable]}
+          ms.ScanCopyOnWrite = ${pref[args.copy_on_write]}
+          ms.Fastscanmethod = ${aligned ? "fsmAligned" : "fsmNotAligned"}
+          ms.Fastscanparameter = ${String(aligned ? args.alignment : 1)}
+          local s = { ms = ms, ready = false }
+          _mcp.scans[${scan_name}] = s
+          ms.firstScan()
+          return ${scanJob(kind, scan_name, true, lua`${`Scan "${scan_name}" complete (${scan_type}, ${value_type}): %d results`}`)}
+        end)()`,
+        wait
+      );
+    }
+  }),
+  defineTool({
+    name: "ce_scan_next",
+    description: `Refine the results of a scan with a new value or condition (the game value must have changed first).
+
+scan_type changed, unchanged, increased, decreased compare with the previous scan and take no value;
+exact, greater, less, between, increased_by, decreased_by need one.`,
+    schema: {
+      value: external_exports.string().default("").describe("New value (or the amount for increased_by / decreased_by)"),
+      scan_type: external_exports.enum(Object.keys(NEXT_SCAN_TYPES)).default("exact").describe("How to refine"),
+      value2: external_exports.string().default("").describe("Upper bound for scan_type 'between'"),
+      scan_name: scanName,
+      ...waitSchema
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ value, scan_type, value2, scan_name, wait }, ctx) {
+      if (!NO_VALUE.has(scan_type) && !value.trim()) {
+        return `Error: scan_type '${scan_type}' needs a value (changed, unchanged, increased and decreased do not)`;
+      }
+      const kind = `${scan_type} next scan`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          ${existingScan(scan_name, true)}
+          _mcp.scanBegin(s)
+          ms.ScanOption = ${NEXT_SCAN_TYPES[scan_type]}
+          ms.Scanvalue1 = ${value}
+          ms.Scanvalue2 = ${value2}
+          ms.CompareToSavedScan = false
+          ms.nextScan()
+          return ${scanJob(kind, scan_name, false, lua`${`Scan "${scan_name}" refined (${scan_type}): %d results remaining`}`)}
+        end)()`,
+        wait
+      );
+    }
+  }),
+  defineTool({
+    name: "ce_scan_results",
+    description: "List the results of a scan with their current values (paginated).",
+    schema: {
+      scan_name: scanName,
+      offset: external_exports.number().int().min(0).default(0).describe("Index of the first result to return"),
+      limit: external_exports.number().int().min(1).max(1e3).default(20).describe("Maximum number of results")
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ scan_name, offset, limit }, ctx) {
+      const text = await ctx.run(lua`
+        ${existingScan(scan_name, true)}
+        local fl = s.fl
+        local total = fl.Count
+        local out = {}
+        if total == 0 then
+          out[1] = 'No results in scan ' .. ${scan_name}
+        elseif ${offset} >= total then
+          out[1] = string.format('offset=%d is past the end: %d results', ${offset}, total)
+        else
+          local last = math.min(total, ${offset} + ${limit})
+          out[1] = string.format('results %d-%d of %d', ${offset} + 1, last, total)
+          for i = ${offset}, last - 1 do out[#out + 1] = string.format('[%d] 0x%s = %s', i, fl.Address[i], fl.Value[i]) end
+          if last < total then out[#out + 1] = string.format('... %d more, next page: offset=%d', total - last, last) end
+        end
+        _mcp_str = table.concat(out, '\n')`);
+      return text ?? "No results";
+    }
+  }),
+  defineTool({
+    name: "ce_scan_reset",
+    description: "Discard a scan and its results (frees the memory and files CE keeps for it).",
+    schema: { scan_name: scanName },
+    writes: false,
+    async run({ scan_name }, ctx) {
+      const text = await ctx.run(lua`
+        local s = _mcp.scans[${scan_name}]
+        if s and not s.ready then _mcp_str = 'Error: scan ' .. ${scan_name} .. ' is still running: cancel its job first' return end
+        _mcp_str = _mcp.dropScan(${scan_name}) and ('Scan ' .. ${scan_name} .. ' discarded') or ('No scan named ' .. ${scan_name})`);
+      return text ?? "Scan reset";
+    }
+  }),
+  defineTool({
+    name: "ce_scan_list",
+    description: "List the scans kept by the server, with their result counts.",
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const text = await ctx.run(lua`
+        local lines = {}
+        for name, s in pairs(_mcp.scans) do
+          lines[#lines + 1] = s.ready and string.format('%s: %d results', name, s.ms.FoundCount) or (name .. ': running')
+        end
+        table.sort(lines)
+        _mcp_str = #lines > 0 and table.concat(lines, '\n') or 'No scans'`);
+      return text ?? "No scans";
+    }
+  }),
+  defineTool({
+    name: "ce_scan_add_to_table",
+    description: "Add a scan result to CE's address list (cheat table), optionally frozen.",
+    schema: {
+      index: external_exports.number().int().min(0).default(0).describe("Index of the result (as shown by ce_scan_results)"),
+      name: external_exports.string().default("").describe("Description of the entry"),
+      value_type: external_exports.enum(Object.keys(RECORD_TYPES)).default("int32").describe("Type of the entry (normally the scan type)"),
+      freeze: external_exports.boolean().default(false).describe("Freeze the value immediately"),
+      scan_name: scanName
+    },
+    writes: ({ freeze }) => freeze,
+    requiresProcess: true,
+    async run({ index, name, value_type, freeze, scan_name }, ctx) {
+      const text = await ctx.run(lua`
+        ${existingScan(scan_name, true)}
+        local count = s.fl.Count
+        local address = ${index} < count and s.fl.Address[${index}] or nil
+        if not address then _mcp_str = string.format('Error: index %d out of range (%d results)', ${index}, count) return end
+        local mr = getAddressList().createMemoryRecord()
+        mr.Address = address
+        mr.VarType = ${RECORD_TYPES[value_type]}
+        mr.Description = ${name} ~= '' and ${name} or ('Scan result ' .. address)
+        if ${freeze} then mr.Active = true end
+        _mcp_str = string.format('Added 0x%s to the address list as record %d (%s = %s)%s', address, mr.ID, mr.Description,
+          tostring(mr.Value), ${freeze} and ' (FROZEN)' or '')`);
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_snapshot_create",
+    description: "Save a scan's current results and values under a name, to compare against later with ce_snapshot_compare.",
+    schema: {
+      name: external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("snapshot").describe("Snapshot name"),
+      scan_name: scanName
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ name, scan_name }, ctx) {
+      const text = await ctx.run(lua`
+        ${existingScan(scan_name, true)}
+        ms.saveCurrentResults(${name})
+        _mcp_str = string.format('Snapshot "%s" saved (%d results of scan %s)', ${name}, ms.FoundCount, ${scan_name})`);
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_snapshot_compare",
+    description: "Refine a scan by comparing current values with a saved snapshot instead of the previous scan.",
+    schema: {
+      mode: external_exports.enum(["changed", "unchanged", "increased", "decreased"]).default("changed").describe("Keep the values that ... since the snapshot"),
+      name: external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("snapshot").describe("Snapshot name"),
+      scan_name: scanName,
+      ...waitSchema
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ mode, name, scan_name, wait }, ctx) {
+      const kind = `compare to snapshot ${name}`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          ${existingScan(scan_name, true)}
+          local known = false
+          for _, saved in ipairs(ms.getSavedResultList() or {}) do if saved == ${name} then known = true end end
+          if not known then _mcp_str = 'Error: no snapshot named ' .. ${name} .. ' in scan ' .. ${scan_name} return end
+          _mcp.scanBegin(s)
+          ms.ScanOption = ${NEXT_SCAN_TYPES[mode]}
+          ms.CompareToSavedScan = true
+          ms.SavedScanName = ${name}
+          ms.nextScan()
+          return ${scanJob(kind, scan_name, false, lua`${`Compared with snapshot "${name}" (${mode}): %d results remaining`}`)}
+        end)()`,
+        wait
+      );
+    }
+  })
+];
+
 // src/tools/index.ts
-var allTools = [...coreTools, ...memoryTools, ...jobTools];
+var allTools = [...coreTools, ...memoryTools, ...scanTools, ...jobTools];
 var names = /* @__PURE__ */ new Set();
 for (const tool of allTools) {
   if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
