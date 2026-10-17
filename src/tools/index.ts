@@ -8,8 +8,9 @@ import { codeTools } from './code.js';
 import { monoTools } from './mono.js';
 import { d3dTools } from './d3d.js';
 import { pointerTools } from './pointers.js';
+import { installTools } from './install.js';
 
-export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...d3dTools, ...pointerTools, ...jobTools];
+export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...d3dTools, ...pointerTools, ...jobTools, ...installTools];
 
 const names = new Set<string>();
 for (const tool of allTools) {

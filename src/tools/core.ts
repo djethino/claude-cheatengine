@@ -7,6 +7,8 @@ import { lua } from '../lua/lit.js';
 import { MAX_OUTPUT_BYTES, DEFAULT_MAX_BYTES } from '../ce/session.js';
 import { defineTool } from './registry.js';
 import { readOnly } from '../options.js';
+import { CEPipeError } from '../ce/pipe.js';
+import { installState } from './install.js';
 
 export const coreTools = [
   defineTool({
@@ -21,11 +23,19 @@ export const coreTools = [
     },
     writes: false,
     async run({ take_over }, ctx) {
-      if (take_over) await ctx.scope.takeOver();
-      const connection = await ctx.run(lua`
-        _mcp_str = string.format('Connected: %s - CE %s (PID: %d) [%s]', _VERSION, tostring(getCEVersion()),
-          getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`);
-      return [connection ?? 'Error: no answer from Cheat Engine', readOnly() ? 'Read-only mode: on (plugin option read_only)' : '']
+      let connection: string;
+      try {
+        if (take_over) await ctx.scope.takeOver();
+        connection =
+          (await ctx.run(lua`
+            _mcp_str = string.format('Connected: %s - CE %s (PID: %d) [%s]', _VERSION, tostring(getCEVersion()),
+              getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`)) ?? 'Error: no answer from Cheat Engine';
+      } catch (err) {
+        // Still report the install state: it tells why CE may not answer
+        if (!(err instanceof CEPipeError)) throw err;
+        connection = `Not connected: ${err.message}`;
+      }
+      return [connection, readOnly() ? 'Read-only mode: on (plugin option read_only)' : '', await installState()]
         .filter(Boolean)
         .join('\n');
     },

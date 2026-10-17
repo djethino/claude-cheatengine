@@ -12,13 +12,15 @@ const h = useHarness({ splitReplies: true });
 
 test('ce_status reports the connection and SAFE mode', async () => {
   const { text, isError } = await h.call('ce_status');
-  assert.equal(text, 'Connected: Lua 5.4 - CE 7.7 (PID: 0) [safe]');
+  assert.match(text, /^Connected: Lua 5\.4 - CE 7\.7 \(PID: 0\) \[safe\]\nCE plugin:/);
   assert.equal(isError, false);
 });
 
 test('Cheat Engine older than 7.7 is refused with a clear message', async () => {
   h.ce.exec('__fake.ceVersion = 7.6');
-  const { text, isError } = await h.call('ce_status');
+  // ce_status reports it (with the install state); any other tool fails with it
+  assert.match((await h.call('ce_status')).text, /^Not connected: Cheat Engine 7\.7 or later is required \(this is CE 7\.6\)/);
+  const { text, isError } = await h.call('ce_process_info');
   assert.match(text, /^Error: Cheat Engine 7\.7 or later is required \(this is CE 7\.6\)/);
   assert.equal(isError, true);
 });
@@ -76,9 +78,10 @@ test('CE not running: a clear error', async () => {
   await server.connect(serverSide);
   const c = new Client({ name: 'test', version: '1' });
   await c.connect(clientSide);
-  const result = await c.callTool({ name: 'ce_status', arguments: {} });
-  const text = (result.content as Array<{ text: string }>)[0].text;
-  assert.match(text, /^Error: Cannot connect to .*Cheat Engine is not running/);
+  const status = await c.callTool({ name: 'ce_status', arguments: {} });
+  assert.match((status.content as Array<{ text: string }>)[0].text, /^Not connected: Cannot connect to .*Cheat Engine is not running.*\nCE plugin:/);
+  const result = await c.callTool({ name: 'ce_process_info', arguments: {} });
+  assert.match((result.content as Array<{ text: string }>)[0].text, /^Error: Cannot connect to .*Cheat Engine is not running/);
   assert.equal(result.isError, true);
   await c.close();
   offline.close();

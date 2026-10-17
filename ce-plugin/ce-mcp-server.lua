@@ -46,7 +46,7 @@ end
 
 local function getSecurityStatus()
   checkUnsafeMode()
-  return CEMCP.isUnsafe and "UNSAFE (writes enabled)" or "SAFE (read-only)"
+  return CEMCP.isUnsafe and "UNSAFE (crash-prone tools allowed)" or "SAFE (crash-prone tools locked)"
 end
 
 --------------------------------------------------------------------------------
