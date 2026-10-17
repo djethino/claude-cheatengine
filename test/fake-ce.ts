@@ -47,7 +47,8 @@ function getAddressSafe(s)
   if s == 'game.exe' then return 0x400000 end
   local m, off = s:match('^(game%.exe)%+(%w+)$')
   if m then return 0x400000 + tonumber(off, 16) end
-  return tonumber(s)
+  -- Like CE, a bare number is hexadecimal ('00400304', the format of FoundList addresses)
+  return tonumber((s:gsub('^0[xX]', '')), 16)
 end
 function getNameFromAddress(a)
   if a >= 0x400000 and a < 0x401000 then return string.format('game.exe+%X', a - 0x400000) end
@@ -101,6 +102,7 @@ end
 function writeString(a, s) return writeBytes(a, { s:byte(1, -1) }) end
 function disassemble(a) return string.format('%X - 90 - nop', a) end
 function getInstructionSize(a) return 1 end
+function splitDisassembledString(s) local a, b, o = s:match('^(%x+) %- (.-) %- (.*)$') return a, b, o, '' end
 local function stringlist(items)
   local o = { Count = #items, destroy = function() end }
   for i, v in ipairs(items) do o[i - 1] = v end
