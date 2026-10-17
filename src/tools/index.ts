@@ -4,8 +4,9 @@ import { memoryTools } from './memory.js';
 import { jobTools } from './jobs.js';
 import { scanTools } from './scan.js';
 import { tableTools } from './table.js';
+import { codeTools } from './code.js';
 
-export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...jobTools];
+export const allTools: ToolDef[] = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...jobTools];
 
 const names = new Set<string>();
 for (const tool of allTools) {
