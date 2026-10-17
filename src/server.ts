@@ -9,7 +9,7 @@ import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sd
 import { CEPipeError } from './ce/pipe.js';
 import { OwnershipError, type Session } from './ce/session.js';
 import { readOnly } from './options.js';
-import { isErrorText, resolveFlag, type Args, type ToolContext, type ToolDef } from './tools/registry.js';
+import { isErrorText, resolveFlag, type Args, type ImageResult, type ToolContext, type ToolDef } from './tools/registry.js';
 import { logger } from './logger.js';
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -23,7 +23,7 @@ function summarize(args: Record<string, unknown>): string {
     .join(' ');
 }
 
-export async function callTool(session: Session, tool: ToolDef, args: Args<ToolDef['schema']>, extra: Extra): Promise<string> {
+export async function callTool(session: Session, tool: ToolDef, args: Args<ToolDef['schema']>, extra: Extra): Promise<string | ImageResult> {
   if (resolveFlag(tool.writes, args) && readOnly()) return BLOCKED_READ_ONLY;
   const dangerous = resolveFlag(tool.dangerous, args);
   const call = { tool: tool.name, args: summarize(args) };
@@ -58,8 +58,16 @@ export function createServer(session: Session, tools: ToolDef[], version: string
   for (const tool of tools) {
     server.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, async (args: Args<ToolDef['schema']>, extra: Extra) => {
       try {
-        const text = await callTool(session, tool, args, extra);
-        return { content: [{ type: 'text' as const, text }], ...(isErrorText(text) && { isError: true }) };
+        const result = await callTool(session, tool, args, extra);
+        if (typeof result === 'string') {
+          return { content: [{ type: 'text' as const, text: result }], ...(isErrorText(result) && { isError: true }) };
+        }
+        return {
+          content: [
+            { type: 'image' as const, data: result.image.data, mimeType: result.image.mimeType },
+            { type: 'text' as const, text: result.text },
+          ],
+        };
       } catch (err) {
         // A bug in the server, not a CE failure: keep the stack in the log
         logger.error(`${tool.name} failed:`, err);

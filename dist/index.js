@@ -2986,7 +2986,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve2.call(this, root, ref);
+      let _sch = resolve3.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3013,7 +3013,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve2(root, ref) {
+    function resolve3(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3843,7 +3843,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve2(baseURI, relativeURI, options) {
+    function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4212,7 +4212,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve2,
+      resolve: resolve3,
       resolveComponent,
       equal,
       serialize,
@@ -13326,12 +13326,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve2) => {
+    return new Promise((resolve3) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve2();
+        resolve3();
       } else {
-        this._stdout.once("drain", resolve2);
+        this._stdout.once("drain", resolve3);
       }
     });
   }
@@ -13361,16 +13361,16 @@ var CEPipe = class {
     return this.socket !== null;
   }
   /** Run a Lua script and return its integer result as the raw unsigned 64-bit value. */
-  async exec(script, timeoutMs) {
+  async exec(script2, timeoutMs) {
     if (this.pending) throw new Error("CEPipe.exec called while a request is in flight");
     const socket = this.socket ?? await this.open();
-    const code = Buffer.from(script, "utf8");
+    const code = Buffer.from(script2, "utf8");
     const packet = Buffer.alloc(1 + 4 + code.length + 8);
     packet.writeUInt8(CMD_RUN_SCRIPT, 0);
     packet.writeUInt32LE(code.length, 1);
     code.copy(packet, 5);
     packet.writeBigUInt64LE(0n, 5 + code.length);
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const timer = setTimeout(() => {
         this.fail(
           new CEPipeError(
@@ -13378,7 +13378,7 @@ var CEPipe = class {
           )
         );
       }, timeoutMs);
-      this.pending = { resolve: resolve2, reject, timer };
+      this.pending = { resolve: resolve3, reject, timer };
       socket.write(packet);
     });
   }
@@ -13386,7 +13386,7 @@ var CEPipe = class {
     this.fail(new CEPipeError("Pipe closed"));
   }
   open() {
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const socket = connect(this.path);
       const timer = setTimeout(() => {
         socket.destroy();
@@ -13401,7 +13401,7 @@ var CEPipe = class {
         socket.on("data", (chunk) => this.onData(chunk));
         socket.on("error", (err) => this.fail(new CEPipeError(`Pipe error: ${err.message}`)));
         socket.on("close", () => this.fail(new CEPipeError("Cheat Engine closed the pipe (CE exited or its Lua server stopped)")));
-        resolve2(socket);
+        resolve3(socket);
       });
       socket.once("error", (err) => {
         clearTimeout(timer);
@@ -13423,10 +13423,10 @@ var CEPipe = class {
     }
     const value = this.buffer.readBigUInt64LE(0);
     this.buffer = Buffer.alloc(0);
-    const { resolve: resolve2, timer } = this.pending;
+    const { resolve: resolve3, timer } = this.pending;
     clearTimeout(timer);
     this.pending = null;
-    resolve2(value);
+    resolve3(value);
   }
   /** Reject the request in flight (if any) and drop the connection; the next exec reconnects. */
   fail(err) {
@@ -13579,7 +13579,7 @@ var Mutex = class {
   /** Resolves with a release function once every earlier holder has released. */
   acquire() {
     let release;
-    const held = new Promise((resolve2) => release = resolve2);
+    const held = new Promise((resolve3) => release = resolve3);
     const turn = this.tail.then(() => release);
     this.tail = this.tail.then(() => held);
     return turn;
@@ -13610,7 +13610,7 @@ var Session = class {
       readMore: (offset, maxBytes) => this.readMore(offset, maxBytes),
       pause: async (ms) => {
         release();
-        await new Promise((resolve2) => setTimeout(resolve2, ms));
+        await new Promise((resolve3) => setTimeout(resolve3, ms));
         release = await this.mutex.acquire();
       },
       takeOver: () => this.takeOver()
@@ -19879,7 +19879,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -19896,7 +19896,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -19974,7 +19974,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve2(parseResult.data);
+            resolve3(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -20236,12 +20236,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve2, interval);
+      const timeoutId = setTimeout(resolve3, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -21372,7 +21372,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -22007,8 +22007,16 @@ function createServer(session2, tools, version2) {
   for (const tool of tools) {
     server2.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, async (args, extra) => {
       try {
-        const text = await callTool(session2, tool, args, extra);
-        return { content: [{ type: "text", text }], ...isErrorText(text) && { isError: true } };
+        const result = await callTool(session2, tool, args, extra);
+        if (typeof result === "string") {
+          return { content: [{ type: "text", text: result }], ...isErrorText(result) && { isError: true } };
+        }
+        return {
+          content: [
+            { type: "image", data: result.image.data, mimeType: result.image.mimeType },
+            { type: "text", text: result.text }
+          ]
+        };
       } catch (err) {
         logger.error(`${tool.name} failed:`, err);
         const message = err instanceof Error ? err.message : String(err);
@@ -23540,16 +23548,16 @@ Created as an auto assembler entry of the address list: disable it (ce_record_ac
     },
     writes: ({ check_only }) => !check_only,
     dangerous: ({ check_only }) => !check_only,
-    async run({ script, description, active, check_only }, ctx) {
-      if (!/\[ENABLE\]/i.test(script) || !/\[DISABLE\]/i.test(script)) {
+    async run({ script: script2, description, active, check_only }, ctx) {
+      if (!/\[ENABLE\]/i.test(script2) || !/\[DISABLE\]/i.test(script2)) {
         return "Error: the script needs an [ENABLE] and a [DISABLE] section (the [DISABLE] section restores what [ENABLE] changed)";
       }
       const text = await ctx.run(
         check_only ? lua`
-            local ok, err = autoAssembleCheck(${script}, true, false)
+            local ok, err = autoAssembleCheck(${script2}, true, false)
             _mcp_str = ok and 'Syntax OK ([ENABLE] section; [DISABLE] is checked by CE when the entry is disabled)'
               or ('Error: [ENABLE] section: ' .. tostring(err))` : lua`
-            local script, description, active = ${script}, ${description}, ${active}
+            local script, description, active = ${script2}, ${description}, ${active}
             ${CREATE_SCRIPT_RECORD}`
       );
       return text ?? "Error: no answer from Cheat Engine";
@@ -23956,8 +23964,232 @@ Recently freed objects can still match until the GC reuses their memory: check a
   })
 ];
 
+// src/tools/d3d.ts
+import { writeFileSync as writeFileSync2 } from "fs";
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+
+// src/capture.ts
+import { execFile } from "child_process";
+import { join } from "path";
+var CAPTURE_TIMEOUT_MS = 3e4;
+function powershellPath() {
+  return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+function script(pid, maxWidth) {
+  return `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CemcpWin {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+}
+'@
+$process = Get-Process -Id ${pid}
+$hwnd = $process.MainWindowHandle
+if ($hwnd -eq [IntPtr]::Zero) { throw 'the process has no main window' }
+if ([CemcpWin]::IsIconic($hwnd)) { throw 'the window is minimized' }
+$rect = New-Object CemcpWin+RECT
+[void][CemcpWin]::GetWindowRect($hwnd, [ref]$rect)
+$width = $rect.Right - $rect.Left
+$height = $rect.Bottom - $rect.Top
+if ($width -le 0 -or $height -le 0) { throw 'the window has no size' }
+$bitmap = New-Object System.Drawing.Bitmap $width, $height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$hdc = $graphics.GetHdc()
+$ok = [CemcpWin]::PrintWindow($hwnd, $hdc, 2)
+$graphics.ReleaseHdc($hdc)
+$graphics.Dispose()
+if (-not $ok) { throw 'PrintWindow failed' }
+if ($width -gt ${maxWidth}) {
+  $scaledHeight = [int][Math]::Round($height * ${maxWidth} / $width)
+  $scaled = New-Object System.Drawing.Bitmap ${maxWidth}, $scaledHeight
+  $g = [System.Drawing.Graphics]::FromImage($scaled)
+  $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $g.DrawImage($bitmap, 0, 0, ${maxWidth}, $scaledHeight)
+  $g.Dispose()
+  $bitmap.Dispose()
+  $bitmap = $scaled
+}
+$stream = New-Object System.IO.MemoryStream
+$bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+[Console]::Out.Write("$($width)x$($height) $($bitmap.Width)x$($bitmap.Height) " + [Convert]::ToBase64String($stream.ToArray()))
+`;
+}
+function captureWindow(pid, maxWidth) {
+  if (process.platform !== "win32") return Promise.reject(new Error("screenshots are only supported on Windows"));
+  const encoded = Buffer.from(script(pid, maxWidth), "utf16le").toString("base64");
+  return new Promise((resolve3, reject) => {
+    execFile(
+      powershellPath(),
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+      { timeout: CAPTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          const reason = stderr.split(/\r?\n/).find((line) => line.trim() && !line.startsWith("At line")) ?? err.message;
+          reject(new Error(`screenshot failed: ${reason.trim()}`));
+          return;
+        }
+        const match = /^(\d+)x(\d+) (\d+)x(\d+) ([A-Za-z0-9+/=]+)$/.exec(stdout.trim());
+        if (!match) {
+          reject(new Error(`screenshot failed: unexpected output (${stdout.slice(0, 80)})`));
+          return;
+        }
+        resolve3({
+          window: { width: Number(match[1]), height: Number(match[2]) },
+          image: { width: Number(match[3]), height: Number(match[4]) },
+          png: Buffer.from(match[5], "base64")
+        });
+      }
+    );
+  });
+}
+
+// src/tools/d3d.ts
+function bgr(hex) {
+  const rgb = parseInt(hex, 16);
+  return (rgb & 255) << 16 | rgb & 65280 | rgb >> 16 & 255;
+}
+var overlayId = external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("mcp_text").describe("Overlay name, to update or remove it later");
+var d3dTools = [
+  defineTool({
+    name: "ce_d3d_init",
+    description: "Hook the game's Direct3D (9, 10 or 11) so overlays can be drawn in it. Can only be done once per game process.",
+    schema: {},
+    writes: true,
+    dangerous: true,
+    requiresProcess: true,
+    async run(_args, ctx) {
+      const text = await ctx.run(
+        lua`
+          _mcp.d3d = _mcp.d3d or {}
+          if _mcp.d3d.pid ~= getOpenedProcessID() then
+            local ok, hook = pcall(createD3DHook)
+            if not ok or not hook then _mcp_str = 'Error: D3D hook failed: ' .. tostring(hook) .. ' (DirectX 9/10/11 games only)' return end
+            _mcp.d3d = { pid = getOpenedProcessID(), hook = hook, fonts = {}, overlays = {} }
+          end
+          local h = _mcp.d3d.hook
+          _mcp_str = (h.Width or 0) > 0 and string.format('D3D hook ready (%dx%d)', h.Width, h.Height)
+            or 'D3D hook ready (the resolution is known once the game renders a frame)'`,
+        { timeoutMs: 6e4 }
+      );
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_d3d_overlay_text",
+    description: `Show text inside the game (D3D hook, see ce_d3d_init). Calling it again with the same id updates that overlay.
+
+Only ASCII characters 32-126 are drawn (CE's font maps).`,
+    schema: {
+      text: external_exports.string().describe("Text to show"),
+      x: external_exports.number().int().default(10).describe("X position in pixels from the left"),
+      y: external_exports.number().int().default(10).describe("Y position in pixels from the top"),
+      color: external_exports.string().regex(/^[0-9a-fA-F]{6}$/).default("FFFFFF").describe("Color as RRGGBB, e.g. FF0000 for red"),
+      font_size: external_exports.number().int().min(6).max(96).default(14).describe("Font size in points"),
+      id: overlayId
+    },
+    writes: true,
+    requiresProcess: true,
+    async run({ text, x, y, color, font_size, id }, ctx) {
+      const unsupported = [...text].filter((c) => c < " " || c > "~");
+      const result = await ctx.run(lua`
+        local d3d = _mcp.d3d
+        if not d3d or d3d.pid ~= getOpenedProcessID() then _mcp_str = 'Error: D3D hook not initialized for this process: run ce_d3d_init first' return end
+        local key = ${`${font_size}/${color.toUpperCase()}`}
+        local fontmap = d3d.fonts[key]
+        local hook = d3d.hook
+        hook.beginUpdate()
+        if not fontmap then
+          local font = createFont()
+          font.Name = 'Arial'
+          font.Size = ${font_size}
+          font.Color = ${bgr(color)}
+          fontmap = hook.createFontmap(font)
+          d3d.fonts[key] = fontmap
+        end
+        local overlay = d3d.overlays[${id}]
+        if overlay then
+          overlay.FontMap = fontmap
+          overlay.Text = ${text}
+          overlay.X, overlay.Y = ${x}, ${y}
+        else
+          d3d.overlays[${id}] = hook.createTextContainer(fontmap, ${x}, ${y}, ${text})
+        end
+        hook.endUpdate()
+        _mcp_str = string.format('Overlay %s %s at (%d, %d)', ${id}, overlay and 'updated' or 'created', ${x}, ${y})
+        if (hook.Width or 0) == 0 then
+          _mcp_str = _mcp_str .. '\nWarning: the D3D hook has not seen any frame of the game yet (resolution 0x0): the overlay will not show if the hook does not work with this game'
+        end`);
+      if (result && unsupported.length) return `${result}
+Note: ${unsupported.length} character(s) outside ASCII 32-126 are not drawn`;
+      return result ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_d3d_overlay_remove",
+    description: "Remove a text overlay (or all of them).",
+    schema: { id: overlayId.optional().describe("Overlay name (default: all overlays)") },
+    writes: false,
+    async run({ id }, ctx) {
+      const text = await ctx.run(lua`
+        local d3d = _mcp.d3d
+        if not d3d then _mcp_str = 'No overlays' return end
+        local count = 0
+        for name, overlay in pairs(d3d.overlays) do
+          if ${id ?? ""} == '' or name == ${id ?? ""} then
+            overlay.destroy()
+            d3d.overlays[name] = nil
+            count = count + 1
+          end
+        end
+        if count == 0 and ${id ?? ""} ~= '' then _mcp_str = 'Error: no overlay named ' .. ${id ?? ""} return end
+        _mcp_str = string.format('Removed %d overlay(s)', count)`);
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_screenshot",
+    description: `Look at the game: a screenshot of the attached process's window, returned as an image (any graphics API; the window must not be minimized).
+
+By default nothing is written to disk. Give save_path to also keep the PNG file.`,
+    schema: {
+      max_width: external_exports.number().int().min(320).max(3840).default(1280).describe("Scale the image down to this width (smaller costs less context)"),
+      save_path: external_exports.string().default("").describe("Also write the PNG to this file (absolute, or relative to the server working directory)")
+    },
+    writes: ({ save_path }) => save_path !== "",
+    requiresProcess: true,
+    async run({ max_width, save_path }, ctx) {
+      const pidText = await ctx.run(lua`_mcp_str = tostring(getOpenedProcessID())`);
+      const pid = Number(pidText);
+      if (!Number.isInteger(pid) || pid <= 0) return pidText ?? "Error: no process attached";
+      let capture;
+      try {
+        capture = await captureWindow(pid, max_width);
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+      let saved = "";
+      if (save_path) {
+        const path = isAbsolute2(save_path) ? save_path : resolve2(process.cwd(), save_path);
+        writeFileSync2(path, capture.png);
+        saved = `, saved to ${path}`;
+      }
+      const size = capture.image.width === capture.window.width ? `${capture.window.width}x${capture.window.height}` : `${capture.window.width}x${capture.window.height} window, scaled to ${capture.image.width}x${capture.image.height}`;
+      return {
+        text: `Screenshot of PID ${pid} (${size}${saved})`,
+        image: { data: capture.png.toString("base64"), mimeType: "image/png" }
+      };
+    }
+  })
+];
+
 // src/tools/index.ts
-var allTools = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...jobTools];
+var allTools = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...d3dTools, ...jobTools];
 var names = /* @__PURE__ */ new Set();
 for (const tool of allTools) {
   if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
@@ -23971,7 +24203,7 @@ var stopping = false;
 async function stop() {
   if (stopping) return;
   stopping = true;
-  await Promise.race([session.release(), new Promise((resolve2) => setTimeout(resolve2, 3e3))]);
+  await Promise.race([session.release(), new Promise((resolve3) => setTimeout(resolve3, 3e3))]);
   process.exit(0);
 }
 process.stdin.on("end", () => void stop());

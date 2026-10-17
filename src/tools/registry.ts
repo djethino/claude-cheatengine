@@ -27,6 +27,12 @@ export interface ToolContext {
   signal: AbortSignal;
 }
 
+/** A tool result with an image (e.g. a screenshot) besides its text. */
+export interface ImageResult {
+  text: string;
+  image: { data: string; mimeType: string };
+}
+
 export interface ToolDef<S extends Shape = Shape> {
   name: string;
   description: string;
@@ -34,7 +40,7 @@ export interface ToolDef<S extends Shape = Shape> {
   writes: boolean | ((args: Args<S>) => boolean);
   dangerous?: boolean | ((args: Args<S>) => boolean);
   requiresProcess?: boolean;
-  run(args: Args<S>, ctx: ToolContext): Promise<string>;
+  run(args: Args<S>, ctx: ToolContext): Promise<string | ImageResult>;
 }
 
 /** Keeps each tool's argument types while collecting tools of different shapes in one list. */
