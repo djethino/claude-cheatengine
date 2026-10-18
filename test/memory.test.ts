@@ -85,6 +85,21 @@ test('ce_value_change: integer and float deltas', async () => {
   assert.equal((await h.call('ce_value_change', { address: '0x400058', delta: '0.25', type: 'float' })).text, 'Changed 0x400058 (float): 1.5 -> 1.75');
 });
 
+test('ce_sample_value: changes over time with their times, min/max', async () => {
+  h.ce.exec('__fake.pid = 7');
+  await h.call('ce_write_memory', { address: '0x400060', type: 'int32', value: '100' });
+  // The "game": damage at 300 ms, a heal at 800 ms
+  h.ce.exec('__fake.onSleep = function(t) if t == 300 then writeInteger(0x400060, 85) elseif t == 800 then writeInteger(0x400060, 95) end end');
+  assert.equal(
+    (await h.call('ce_sample_value', { address: '0x400060', duration_ms: 1000 })).text,
+    '0x400060 (int32) sampled for 1.0 s: 11 reads, 2 changes\nfirst 100, last 95, min 85, max 100\n  +0.30 s: 100 -> 85\n  +0.80 s: 85 -> 95',
+  );
+  assert.equal(
+    (await h.call('ce_sample_value', { address: '0x900000', duration_ms: 100, interval_ms: 50 })).text,
+    '0x900000 (int32) sampled for 0.1 s: 3 reads, 0 changes, 3 unreadable\nError: the address was never readable',
+  );
+});
+
 test('ce_aob_scan: pattern checked, wildcards, module range, results as a named scan', async () => {
   h.ce.exec('__fake.pid = 7');
   assert.match((await h.call('ce_aob_scan', { pattern: "90 ')" })).text, /^Error: invalid pattern/);

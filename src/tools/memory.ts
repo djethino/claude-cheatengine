@@ -7,6 +7,10 @@ import { lua, raw, type LuaCode } from '../lua/lit.js';
 import { defineTool } from './registry.js';
 import { listBody, pageSchema } from './list.js';
 import { ANTI_CHEAT_ADVICE } from '../anticheat.js';
+import { runJob, waitSchema } from './jobs.js';
+
+/** ce_sample_value: changes listed in its report. */
+const MAX_CHANGES_LISTED = 50;
 
 /** Lua that resolves an address expression into the local `addr`, or reports it and returns. */
 export function resolveAddress(expression: string, local = 'addr'): LuaCode {
@@ -296,6 +300,70 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
         local after = ${raw(read)}
         _mcp_str = string.format('Changed 0x%X (%s): ' .. ${fmt} .. ' -> ' .. ${fmt}, addr, ${type}, current, after)`);
       return text ?? 'Error: no answer from Cheat Engine';
+    },
+  }),
+
+  defineTool({
+    name: 'ce_sample_value',
+    description: `Read a value repeatedly for a while (in the background, with a progress window) and report how it moved: first/last/min/max and every change with its time. To see what a value does while the game runs (a timer, a regenerating stat, a value that changes only on some event).`,
+    schema: {
+      address: z.string().describe(addressDescription),
+      type: z.enum(VALUE_TYPES).default('int32').describe('Data type of the value'),
+      duration_ms: z.number().int().min(100).max(600_000).default(5000).describe('How long to watch, in milliseconds'),
+      interval_ms: z.number().int().min(10).max(60_000).default(100).describe('Time between two reads, in milliseconds'),
+      ...waitSchema,
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ address, type, duration_ms, interval_ms, wait }, ctx) {
+      const samples = Math.floor(duration_ms / interval_ms) + 1;
+      const isFloat = type === 'float' || type === 'double';
+      const { read } = isFloat ? FLOAT_TYPES[type as 'float' | 'double'] : INT_TYPES[type as IntType];
+      const kind = `sample ${address}`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          ${resolveAddress(address)}
+          local fmt = ${isFloat ? '%.9g' : '%d'}
+          local w = { changes = {}, unreadable = 0 }
+          return {
+            kind = ${kind}, window = true,
+            run = function(job)
+              job.total = ${samples}
+              local start = getTickCount()
+              for i = 1, ${samples} do
+                if job.cancelled then return end
+                local v = ${raw(read)}
+                if v == nil then
+                  w.unreadable = w.unreadable + 1
+                else
+                  if w.first == nil then w.first, w.min, w.max = v, v, v end
+                  if w.last ~= nil and v ~= w.last then w.changes[#w.changes + 1] = { getTickCount() - start, w.last, v } end
+                  w.min, w.max, w.last = math.min(w.min, v), math.max(w.max, v), v
+                end
+                job.done = i
+                job.message = string.format('%s: %d changes', ${kind}, #w.changes)
+                if i < ${samples} then sleep(${interval_ms}) end
+              end
+              w.elapsed = getTickCount() - start
+            end,
+            finish = function(job)
+              local head = string.format('0x%X (%s) sampled for %.1f s: %d reads, %d changes%s', addr, ${type}, (w.elapsed or 0) / 1000,
+                ${samples}, #w.changes, w.unreadable > 0 and string.format(', %d unreadable', w.unreadable) or '')
+              if w.first == nil then return head .. '\nError: the address was never readable' end
+              local out = { head, string.format('first ' .. fmt .. ', last ' .. fmt .. ', min ' .. fmt .. ', max ' .. fmt, w.first, w.last, w.min, w.max) }
+              for i = 1, math.min(#w.changes, ${MAX_CHANGES_LISTED}) do
+                local c = w.changes[i]
+                out[#out + 1] = string.format('  +%.2f s: ' .. fmt .. ' -> ' .. fmt, c[1] / 1000, c[2], c[3])
+              end
+              if #w.changes > ${MAX_CHANGES_LISTED} then out[#out + 1] = string.format('  ... %d more changes', #w.changes - ${MAX_CHANGES_LISTED}) end
+              return table.concat(out, '\n')
+            end,
+          }
+        end)()`,
+        wait,
+      );
     },
   }),
 

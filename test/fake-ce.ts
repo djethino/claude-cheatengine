@@ -128,6 +128,10 @@ function __fake.stepThreads()
 end
 -- A job's thread can call this to wait for the next step
 function __fake.yield() if coroutine.isyieldable() then coroutine.yield() end end
+-- Time passes only when a thread sleeps; __fake.onSleep (if set) plays the game meanwhile
+__fake.tick = 0
+function getTickCount() return __fake.tick end
+function sleep(ms) __fake.tick = __fake.tick + ms if __fake.onSleep then __fake.onSleep(__fake.tick) end __fake.yield() end
 caHide = 1
 function createTimer() return { Interval = 1000, Enabled = true } end
 local function control() return { destroy = function() __fake.windows = (__fake.windows or 1) - 1 end, show = function() __fake.windows = (__fake.windows or 0) + 1 end } end
