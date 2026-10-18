@@ -172,7 +172,7 @@ or assign a string to _mcp_str. Errors are reported as LUA_ERROR / LUA_SYNTAX_ER
 
 ERROR HANDLING:
 - If this hangs or fails repeatedly, STOP and ask the user to check CE
-- CE may have a popup dialog blocking execution
+- A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs)
 - Don't retry more than 2-3 times - report failure to user`,
     schema: {
       code: z.string().describe('Lua code to execute in Cheat Engine'),

@@ -54,7 +54,7 @@ export class CEPipe {
       const timer = setTimeout(() => {
         this.fail(
           new CEPipeError(
-            `Cheat Engine did not answer within ${timeoutMs / 1000} s (a dialog may be open in CE, or the operation is still running there)`,
+            `Cheat Engine did not answer within ${timeoutMs / 1000} s (the operation may still be running there; ce_dialogs shows any dialog open in CE)`,
           ),
         );
       }, timeoutMs);

@@ -57,6 +57,7 @@ Every tool parameter reaches Cheat Engine's Lua as data, never as code, so no in
 | Area | Tools |
 |---|---|
 | Connection | `ce_status`, `ce_get_logs`, `ce_output_more` (rest of a long output) |
+| Cheat Engine itself | `ce_launch`, `ce_restart` (asks you first when something would be lost), `ce_dialogs`, `ce_dialog_close` (information dialogs only) |
 | Processes and memory | `ce_attach`, `ce_list_processes`, `ce_list_modules`, `ce_memory_regions`, `ce_process_info`, `ce_read_memory`, `ce_write_memory`, `ce_value_change`, `ce_sample_value` (how a value moves over time), `ce_resolve_address`, `ce_disassemble`, `ce_struct_view` |
 | Value scans | `ce_scan_value`, `ce_scan_next`, `ce_aob_scan` (byte patterns), `ce_scan_results`, `ce_scan_list`, `ce_scan_reset`, `ce_scan_add_to_table`, `ce_snapshot_create`, `ce_snapshot_compare` |
 | Pointers | `ce_pointer_scan` (static pointer chains, several levels) |
@@ -69,6 +70,7 @@ Every tool parameter reaches Cheat Engine's Lua as data, never as code, so no in
 
 Some details worth knowing:
 
+- **Dialogs never leave Claude waiting blind.** When a call opens a dialog in Cheat Engine (an auto assembler error, a Mono failure...), the call stops at once and says what the dialog is. Claude may close a dialog that only informs (one button) after reading it; a dialog that asks something (Yes/No) is always yours to answer. Dialogs you open yourself in CE's window do not get in the way.
 - **Long operations do not freeze Cheat Engine.** Scans, AOB scans, pointer scans, value sampling and instance searches run in the background with a progress window (with a Cancel button) in CE, and send progress notifications to Claude Code. Most take `wait=false` to get a job id at once and check it later.
 - **Scans are Claude's own**: they never touch the scan you run by hand in CE's main window. Several named scans can run side by side (`scan_name`).
 - **Code changes go through the address list**: `ce_asm_inject`, `ce_asm_script` and `ce_code_entry` create auto assembler entries you can see and toggle in CE; disabling one restores the original code.
@@ -78,7 +80,9 @@ Some details worth knowing:
 
 ## Troubleshooting
 
-**`Not connected: Cannot connect to \\.\pipe\ce-mcp`** — Cheat Engine is not running, or its MCP plugin is not loaded. Check `ce_status` (loader state), run `/ce-install` if needed, restart CE, and check that CE's *MCP* menu shows the server as started.
+**`Not connected: Cannot connect to \\.\pipe\ce-mcp`** — Cheat Engine is not running (Claude can start it with `ce_launch`), or its MCP plugin is not loaded. Check `ce_status` (loader state), run `/ce-install` if needed, restart CE, and check that CE's *MCP* menu shows the server as started.
+
+**Status label `MCP: OFF (other CE)`** — another Cheat Engine already serves Claude Code: only one does, so that an unlock and a lock never land in different Cheat Engines. Work in that one, or close it and use *Start Server* in this one's MCP menu. `ce_status` warns when several Cheat Engines run.
 
 **`Cheat Engine 7.7 or later is required`** — update Cheat Engine.
 
@@ -86,7 +90,9 @@ Some details worth knowing:
 
 **`BLOCKED: anti-cheat detected in ...`** — the game embeds an anti-cheat (see Safety). Using Cheat Engine on it can get your account banned; if you accept the risk (offline game, no account), run `/unsafe-ce` and confirm in Cheat Engine.
 
-**`Cheat Engine did not answer within ... s`** — a dialog is probably open in Cheat Engine (an error, a confirmation): close it. The next call reconnects by itself.
+**`Cheat Engine is blocked by a dialog`** — a call opened a dialog in Cheat Engine and waits for it. The message says whether it only informs (Claude closes it after reading it with `ce_dialogs`) or asks you something (answer it in CE). The result of that call is lost: Claude checks the state afterwards.
+
+**`Cheat Engine did not answer within ... s`** — the operation is still running in CE, or CE is stuck. The next call reconnects by itself; `ce_restart` restarts CE.
 
 **`Another Claude Code session is using Cheat Engine`** — two Claude Code sessions cannot drive the same Cheat Engine at once (their calls would mix). The message tells Claude how to take it over if you want this session to.
 
