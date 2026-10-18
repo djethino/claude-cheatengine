@@ -8,16 +8,12 @@
  * script?", "save changes?") is the user's decision and is never answered by Claude.
  */
 
-import { winHelper } from '../win/helper.js';
-
-/** Where CE's dialogs are looked for: its process and main window, known once connected. */
-export interface CEWindow {
-  pid: number;
-  main: number;
-}
+import { ceProcesses, winHelper } from '../win/helper.js';
 
 export interface CEDialog {
   id: string;
+  /** Cheat Engine process showing it. */
+  pid: number;
   title: string;
   /** Texts of its child windows; CE's labels are not windows, their text is only in the image. */
   texts: string[];
@@ -30,8 +26,14 @@ export function isInformation(dialog: CEDialog): boolean {
   return dialog.buttons.length === 1;
 }
 
-export async function listDialogs(win: CEWindow, withImage = false): Promise<CEDialog[]> {
-  return winHelper.request<CEDialog[]>({ cmd: 'dialogs', pid: win.pid, main: win.main, image: withImage });
+/**
+ * Dialogs of the Cheat Engine serving the pipe (its PID, known once connected), or of every
+ * running Cheat Engine when it is not known yet (e.g. the server started while CE was blocked).
+ */
+export async function listDialogs(cePid: number | null, withImage = false): Promise<CEDialog[]> {
+  const pids = cePid ? [cePid] : await ceProcesses();
+  if (!pids.length) return [];
+  return winHelper.request<CEDialog[]>({ cmd: 'dialogs', pids, image: withImage });
 }
 
 /** One line per dialog, with what to do about it. */
@@ -49,8 +51,8 @@ export function describeDialogs(dialogs: CEDialog[]): string {
 }
 
 /** Close an information dialog (WM_CLOSE, what its close button does); refuse a question. */
-export async function closeInformationDialog(win: CEWindow, id: string): Promise<string> {
-  const dialogs = await listDialogs(win);
+export async function closeInformationDialog(cePid: number | null, id: string): Promise<string> {
+  const dialogs = await listDialogs(cePid);
   const dialog = dialogs.find((d) => d.id === id);
   if (!dialog) {
     return dialogs.length
@@ -64,7 +66,7 @@ export async function closeInformationDialog(win: CEWindow, id: string): Promise
   // The dialog's own message loop handles the close: check that it is gone
   for (let i = 0; i < 10; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-    if (!(await listDialogs(win)).some((d) => d.id === id)) return `Closed the dialog "${dialog.title}"`;
+    if (!(await listDialogs(cePid)).some((d) => d.id === id)) return `Closed the dialog "${dialog.title}"`;
   }
   return `Error: the dialog "${dialog.title}" did not close`;
 }

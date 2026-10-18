@@ -41,7 +41,7 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
       throw new Error(`${tool.name} works outside CE: it cannot run CE code`);
     };
     const scope = new Proxy({} as Scope, { get: unavailable });
-    return tool.run(args, { scope, signal: extra.signal, run: unavailable, progress, ceWindow: () => session.ceWindow });
+    return tool.run(args, { scope, signal: extra.signal, run: unavailable, progress, cePid: () => session.cePid });
   }
 
   try {
@@ -52,7 +52,7 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
         run: (body, options) =>
           scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
         progress,
-        ceWindow: () => session.ceWindow,
+        cePid: () => session.cePid,
       };
       return tool.run(args, ctx);
     });

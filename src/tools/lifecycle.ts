@@ -16,8 +16,6 @@ import { ceProcesses } from '../win/helper.js';
 
 const LAUNCH_TIMEOUT_MS = 60_000;
 const EXIT_TIMEOUT_MS = 30_000;
-const NOT_CONNECTED =
-  'Not connected to Cheat Engine in this session yet, so its windows cannot be located: ask the user to look at Cheat Engine';
 
 /** PID of the CE answering on the pipe, or the reason it does not answer. */
 async function answering(ctx: ToolContext): Promise<number | string> {
@@ -65,9 +63,7 @@ A dialog with one button only informs: close it with ce_dialog_close once read. 
     schema: {},
     writes: false,
     async run(_args, ctx) {
-      const win = ctx.ceWindow();
-      if (!win) return `Error: ${NOT_CONNECTED}`;
-      const dialogs = await listDialogs(win, true);
+      const dialogs = await listDialogs(ctx.cePid(), true);
       if (!dialogs.length) return 'No dialog is open in Cheat Engine';
       const text = `${dialogs.length} dialog(s) open in Cheat Engine (image: the first one)\n${dialogs.map((d) => `id ${d.id}: ${describeDialogs([d])}`).join('\n')}`;
       const image = dialogs[0].image;
@@ -85,9 +81,7 @@ A dialog with one button only informs: close it with ce_dialog_close once read. 
     },
     writes: false,
     async run({ id }, ctx) {
-      const win = ctx.ceWindow();
-      if (!win) return `Error: ${NOT_CONNECTED}`;
-      return closeInformationDialog(win, id);
+      return closeInformationDialog(ctx.cePid(), id);
     },
   }),
 
@@ -156,12 +150,12 @@ When the address list has entries or a job runs, the user confirms in a dialog i
       if (reply !== 'closing') return reply ?? 'Error: no answer from Cheat Engine';
       // The CE that answered (known since this call connected); wait for it to end. A question it
       // asks while closing is the user's
-      const closing = ctx.ceWindow();
+      const closing = ctx.cePid();
       if (!closing) return 'Error: Cheat Engine is closing but its process is unknown: start it again with ce_launch once it is closed';
       const deadline = Date.now() + EXIT_TIMEOUT_MS;
       while (Date.now() < deadline) {
         await ctx.scope.pause(500);
-        if (!(await ceProcesses()).includes(closing.pid)) return launch(ctx);
+        if (!(await ceProcesses()).includes(closing)) return launch(ctx);
         const dialogs = await listDialogs(closing);
         if (dialogs.length) return `Cheat Engine did not close yet:\n${describeDialogs(dialogs)}\nOnce it is closed, start it again with ce_launch.`;
       }

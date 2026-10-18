@@ -66,25 +66,23 @@ public static class CemcpUi {
 '@
 [void][CemcpUi]::SetProcessDPIAware()
 
-# The dialogs blocking CE: while a modal dialog is shown, CE's main window is disabled and the
-# dialog is a visible, enabled window of the process (CE's dialogs are LCL forms, their labels are
-# not windows: the text is only in the image)
-function Get-Dialogs($pid_, $main, $withImage) {
-  $mainHandle = [IntPtr][long]$main
-  if (-not [CemcpUi]::IsWindow($mainHandle)) { throw 'Cheat Engine main window not found' }
-  if ([CemcpUi]::IsWindowEnabled($mainHandle)) { return @() }
-  # The hidden Lazarus application window owns the main form: never a dialog
-  $appWindow = [CemcpUi]::GetWindow($mainHandle, 4)
+# The dialogs blocking CE: a modal dialog disables the window that owns it (CE's main form), so a
+# dialog is a visible, enabled window of the process whose owner, of the same process, is disabled.
+# Non-modal windows (Lua engine, progress windows) are owned by the application window, which stays
+# enabled. CE's dialogs are LCL forms: their labels are not windows, the text is only in the image
+function Get-Dialogs($pid_, $withImage) {
   $out = @()
   foreach ($h in [CemcpUi]::TopWindows([uint32]$pid_)) {
-    if ($h -eq $mainHandle -or $h -eq $appWindow -or -not [CemcpUi]::IsWindowEnabled($h)) { continue }
-    $texts = @(); $buttons = @()
+    if (-not [CemcpUi]::IsWindowEnabled($h)) { continue }
+    $owner = [CemcpUi]::GetWindow($h, 4)
+    if ($owner -eq [IntPtr]::Zero -or [CemcpUi]::Pid($owner) -ne [uint32]$pid_ -or [CemcpUi]::IsWindowEnabled($owner)) { continue }
+    $texts = @(); $buttons = @(); $buttonHandles = @()
     foreach ($c in [CemcpUi]::Children($h)) {
       $t = [CemcpUi]::Text($c)
-      if ([CemcpUi]::IsPushButton($c)) { $buttons += @{ id = [string][long]$c; text = $t } }
+      if ([CemcpUi]::IsPushButton($c)) { $buttons += @{ id = [string][long]$c; text = $t }; $buttonHandles += $c }
       elseif ($t.Trim() -ne '') { $texts += $t }
     }
-    $d = @{ id = [string][long]$h; title = [CemcpUi]::Text($h); class = [CemcpUi]::Class($h); texts = $texts; buttons = $buttons }
+    $d = @{ id = [string][long]$h; pid = [int]$pid_; title = [CemcpUi]::Text($h); texts = $texts; buttons = $buttons }
     if ($withImage) {
       $r = New-Object CemcpUi+RECT
       [void][CemcpUi]::GetWindowRect($h, [ref]$r)
@@ -94,7 +92,23 @@ function Get-Dialogs($pid_, $main, $withImage) {
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $hdc = $g.GetHdc()
         [void][CemcpUi]::PrintWindow($h, $hdc, 2)
-        $g.ReleaseHdc($hdc); $g.Dispose()
+        $g.ReleaseHdc($hdc)
+        # The dialog's print sometimes leaves a button out (seen live with CE's LCL dialogs): print
+        # every button by itself over it, so the choices are always in the image
+        foreach ($c in $buttonHandles) {
+          $cr = New-Object CemcpUi+RECT
+          [void][CemcpUi]::GetWindowRect($c, [ref]$cr)
+          $cw = $cr.Right - $cr.Left; $ch = $cr.Bottom - $cr.Top
+          if ($cw -le 0 -or $ch -le 0) { continue }
+          $cb = New-Object System.Drawing.Bitmap $cw, $ch
+          $cg = [System.Drawing.Graphics]::FromImage($cb)
+          $cdc = $cg.GetHdc()
+          $printed = [CemcpUi]::PrintWindow($c, $cdc, 2)
+          $cg.ReleaseHdc($cdc); $cg.Dispose()
+          if ($printed) { $g.DrawImage($cb, $cr.Left - $r.Left, $cr.Top - $r.Top) }
+          $cb.Dispose()
+        }
+        $g.Dispose()
         $ms = New-Object System.IO.MemoryStream
         $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Dispose()
@@ -110,7 +124,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   try {
     $req = $line | ConvertFrom-Json
     switch ($req.cmd) {
-      'dialogs' { $result = @(Get-Dialogs $req.pid $req.main $req.image) }
+      'dialogs' { $result = @(foreach ($p in $req.pids) { Get-Dialogs $p $req.image }) }
       'close' {
         $h = [IntPtr][long]$req.id
         if (-not [CemcpUi]::IsWindow($h)) { throw 'the dialog no longer exists' }

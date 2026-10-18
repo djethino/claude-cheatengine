@@ -19,7 +19,7 @@ import { decodeBytes, incompleteUtf8Tail } from './text.js';
 import { lua, raw, type LuaCode } from '../lua/lit.js';
 import prelude from '../lua/prelude.lua';
 import { ANTI_CHEAT_ADVICE, detectAntiCheat } from '../anticheat.js';
-import { describeDialogs, isInformation, listDialogs, type CEDialog, type CEWindow } from './dialogs.js';
+import { describeDialogs, isInformation, listDialogs, type CEDialog } from './dialogs.js';
 import { logger } from '../logger.js';
 
 export const PIPE_PATH = '\\\\.\\pipe\\ce-mcp';
@@ -99,8 +99,8 @@ export class Session {
   private firstConnection = true;
   /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
   private moreTotal = 0;
-  /** CE's process and main window, read at every connection: where its dialogs are looked for. */
-  private window: CEWindow | null = null;
+  /** PID of the CE serving the pipe, read at every connection: whose dialogs are looked for. */
+  private pid: number | null = null;
   private dialogWatchFailed = false;
 
   constructor(
@@ -138,31 +138,47 @@ export class Session {
     this.pipe.close();
   }
 
-  /** CE's process and main window as of the last connection (null before any). No lock: usable while a call is blocked. */
-  get ceWindow(): CEWindow | null {
-    return this.window;
+  /** PID of the CE serving the pipe as of the last connection (null before any). No lock: usable while a call is blocked. */
+  get cePid(): number | null {
+    return this.pid;
   }
 
   /**
-   * One pipe request, watched for dialogs: while it runs longer than DIALOG_WATCH_MS, CE's dialogs
-   * are listed; one that blocks CE (any, or an information one when the call asks the user a
-   * question) ends the wait with its description instead of a timeout.
+   * One pipe request, watched for dialogs. A dialog the user opens in CE's window does not block
+   * the pipe (its modal loop still runs pipe scripts); one opened while the script runs does: the
+   * script waits for it (an auto assembler error, a Mono failure, a confirmation). So while the
+   * request runs longer than DIALOG_WATCH_MS, CE's dialogs are listed (of every running CE when the
+   * one serving the pipe is not known yet); a new one (any, or an information one when the call
+   * asks the user a question) ends the wait with its description instead of a timeout.
    */
   private async exec(script: string, timeoutMs: number, asksUser = false): Promise<bigint> {
-    const win = this.window;
-    if (!win || timeoutMs <= DIALOG_WATCH_MS) return this.pipe.exec(script, timeoutMs);
+    const pid = this.pid;
+    if (timeoutMs <= DIALOG_WATCH_MS) return this.pipe.exec(script, timeoutMs);
     let done = false;
+    const failed = (err: unknown): void => {
+      // Reported once: the calls still work, they only end in a plain timeout
+      if (!this.dialogWatchFailed) logger.error('cannot look for Cheat Engine dialogs:', err);
+      this.dialogWatchFailed = true;
+    };
+    // Dialogs already open when the request starts were not opened by it
+    const earlier = listDialogs(pid).then(
+      (dialogs) => new Set(dialogs.map((d) => d.id)),
+      (err: unknown) => {
+        failed(err);
+        return null;
+      },
+    );
     const watch = async (): Promise<void> => {
+      const before = await earlier;
+      if (!before) return;
       for (;;) {
         await new Promise((resolve) => setTimeout(resolve, DIALOG_WATCH_MS));
         if (done) return;
         let dialogs: CEDialog[];
         try {
-          dialogs = await listDialogs(win);
+          dialogs = (await listDialogs(pid)).filter((d) => !before.has(d.id));
         } catch (err) {
-          // Reported once: the calls still work, they only end in a plain timeout
-          if (!this.dialogWatchFailed) logger.error('cannot look for Cheat Engine dialogs:', err);
-          this.dialogWatchFailed = true;
+          failed(err);
           return;
         }
         if (done) return;
@@ -218,9 +234,7 @@ export class Session {
         `Cheat Engine ${MIN_CE_VERSION / 100} or later is required (this is CE ${ceVersion / 100}): update it from https://www.cheatengine.org`,
       );
     }
-    const pid = Number(await this.pipe.exec('return getCheatEngineProcessID()', DEFAULT_TIMEOUT_MS));
-    const main = Number(await this.pipe.exec('local f = getMainForm() return f and f.Handle or 0', DEFAULT_TIMEOUT_MS));
-    this.window = pid && main ? { pid, main } : null;
+    this.pid = Number(await this.exec('return getCheatEngineProcessID()', DEFAULT_TIMEOUT_MS)) || null;
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
     this.moreTotal = 0;
