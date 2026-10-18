@@ -18,7 +18,7 @@
     "zod": "^3.23.0"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22"
   },
   "author": {
     "name": "ASymptOmatik"
