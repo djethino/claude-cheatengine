@@ -67,6 +67,11 @@ export class CEPipe {
     this.fail(new CEPipeError('Pipe closed'));
   }
 
+  /** Give up the request in flight with this error (its late reply is discarded with the socket). */
+  abort(err: Error): void {
+    if (this.pending) this.fail(err);
+  }
+
   private open(): Promise<Socket> {
     return new Promise((resolve, reject) => {
       const socket = connect(this.path);

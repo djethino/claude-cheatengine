@@ -19,6 +19,8 @@ import { decodeBytes, incompleteUtf8Tail } from './text.js';
 import { lua, raw, type LuaCode } from '../lua/lit.js';
 import prelude from '../lua/prelude.lua';
 import { ANTI_CHEAT_ADVICE, detectAntiCheat } from '../anticheat.js';
+import { describeDialogs, isInformation, listDialogs, type CEDialog, type CEWindow } from './dialogs.js';
+import { logger } from '../logger.js';
 
 export const PIPE_PATH = '\\\\.\\pipe\\ce-mcp';
 
@@ -55,6 +57,11 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Cap on the returned text; the rest stays readable with ce_output_more. */
   maxBytes?: number;
+  /**
+   * The call asks the user a question in CE and waits for the answer (the unlock): a question
+   * dialog is expected. Otherwise any dialog that blocks CE ends the wait with its description.
+   */
+  asksUser?: boolean;
 }
 
 export interface CallInfo {
@@ -78,6 +85,12 @@ class Mutex {
 
 export class OwnershipError extends Error {}
 
+/** A call given up because a dialog blocks Cheat Engine. */
+export class CEDialogError extends CEPipeError {}
+
+/** A call running longer than this starts looking for dialogs blocking CE, then again at this interval. */
+const DIALOG_WATCH_MS = 1500;
+
 export class Session {
   private readonly mutex = new Mutex();
   private readonly pipe: CEPipe;
@@ -86,6 +99,9 @@ export class Session {
   private firstConnection = true;
   /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
   private moreTotal = 0;
+  /** CE's process and main window, read at every connection: where its dialogs are looked for. */
+  private window: CEWindow | null = null;
+  private dialogWatchFailed = false;
 
   constructor(
     pipePath: string = PIPE_PATH,
@@ -122,6 +138,52 @@ export class Session {
     this.pipe.close();
   }
 
+  /** CE's process and main window as of the last connection (null before any). No lock: usable while a call is blocked. */
+  get ceWindow(): CEWindow | null {
+    return this.window;
+  }
+
+  /**
+   * One pipe request, watched for dialogs: while it runs longer than DIALOG_WATCH_MS, CE's dialogs
+   * are listed; one that blocks CE (any, or an information one when the call asks the user a
+   * question) ends the wait with its description instead of a timeout.
+   */
+  private async exec(script: string, timeoutMs: number, asksUser = false): Promise<bigint> {
+    const win = this.window;
+    if (!win || timeoutMs <= DIALOG_WATCH_MS) return this.pipe.exec(script, timeoutMs);
+    let done = false;
+    const watch = async (): Promise<void> => {
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, DIALOG_WATCH_MS));
+        if (done) return;
+        let dialogs: CEDialog[];
+        try {
+          dialogs = await listDialogs(win);
+        } catch (err) {
+          // Reported once: the calls still work, they only end in a plain timeout
+          if (!this.dialogWatchFailed) logger.error('cannot look for Cheat Engine dialogs:', err);
+          this.dialogWatchFailed = true;
+          return;
+        }
+        if (done) return;
+        if (dialogs.length && (!asksUser || dialogs.some(isInformation))) {
+          this.pipe.abort(
+            new CEDialogError(
+              `Cheat Engine is blocked by a dialog: this call was given up (its result is lost; check the state once the dialog is closed).\n${describeDialogs(dialogs)}`,
+            ),
+          );
+          return;
+        }
+      }
+    };
+    void watch();
+    try {
+      return await this.pipe.exec(script, timeoutMs);
+    } finally {
+      done = true;
+    }
+  }
+
   /**
    * Give CE up when the server stops, so the next session (or a restarted one) is not refused
    * until the owner claim lapses. Best effort: CE may already be gone.
@@ -148,13 +210,17 @@ export class Session {
       _mcp_server = { owner = ${this.owner}, version = ${this.version}, resetSafe = ${this.firstConnection}, lapse = ${OWNER_LAPSE_S} }
       ${raw(prelude)}
       return math.floor(getCEVersion() * 100 + 0.5)`;
-    const ceVersion = Number(await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS));
+    // Watched with the window of the previous connection: a dialog that still blocks CE is reported
+    const ceVersion = Number(await this.exec(init.code, DEFAULT_TIMEOUT_MS));
     if (ceVersion < MIN_CE_VERSION) {
       this.pipe.close();
       throw new CEPipeError(
         `Cheat Engine ${MIN_CE_VERSION / 100} or later is required (this is CE ${ceVersion / 100}): update it from https://www.cheatengine.org`,
       );
     }
+    const pid = Number(await this.pipe.exec('return getCheatEngineProcessID()', DEFAULT_TIMEOUT_MS));
+    const main = Number(await this.pipe.exec('local f = getMainForm() return f and f.Handle or 0', DEFAULT_TIMEOUT_MS));
+    this.window = pid && main ? { pid, main } : null;
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
     this.moreTotal = 0;
@@ -166,9 +232,9 @@ export class Session {
   }
 
   /** Raw integer result of a protocol-internal script (no gate, no text). */
-  private async runInt(code: LuaCode, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<bigint> {
+  private async runInt(code: LuaCode, timeoutMs = DEFAULT_TIMEOUT_MS, asksUser = false): Promise<bigint> {
     await this.ensureReady();
-    return this.pipe.exec(code.code, timeoutMs);
+    return this.exec(code.code, timeoutMs, asksUser);
   }
 
   private chunk(call: CallInfo | null, body: LuaCode, options: RunOptions): LuaCode {
@@ -225,7 +291,7 @@ export class Session {
     const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 
     const runOnce = async (): Promise<string | null> => {
-      const length = await this.runInt(code, timeoutMs);
+      const length = await this.runInt(code, timeoutMs, options.asksUser ?? false);
       const connection = this.pipe.connectionId;
       const text = length ? await this.readString('_mcp_str', Number(length), maxBytes, 0) : null;
       // A reconnect during the transfer would read the globals of a fresh CE Lua state

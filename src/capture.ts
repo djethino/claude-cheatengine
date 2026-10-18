@@ -8,14 +8,9 @@
  */
 
 import { execFile } from 'child_process';
-import { join } from 'path';
+import { powershellPath } from './win/helper.js';
 
 const CAPTURE_TIMEOUT_MS = 30_000;
-
-/** Windows PowerShell 5.1 ships with every Windows; its absolute path does not depend on PATH. */
-function powershellPath(): string {
-  return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-}
 
 /** Part of the window image to keep, in pixels of the client area (or of the whole window). */
 export interface Region {

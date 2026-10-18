@@ -17,6 +17,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { basename, join } from 'path';
 import { promisify } from 'util';
 import pluginScript from '../ce-plugin/ce-mcp-server.lua';
+import { powershellPath } from './win/helper.js';
 
 const run = promisify(execFile);
 
@@ -41,10 +42,6 @@ end
 `;
 
 const ELEVATION_TIMEOUT_MS = 120_000;
-
-function powershellPath(): string {
-  return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-}
 
 function regPath(): string {
   return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows', 'System32', 'reg.exe');

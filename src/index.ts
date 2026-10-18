@@ -7,6 +7,7 @@ import { allTools } from './tools/index.js';
 import { syncUserScript, writeLoader } from './install.js';
 import { setSyncError } from './tools/install.js';
 import { logger } from './logger.js';
+import { winHelper } from './win/helper.js';
 
 // Elevated helper started by /ce-install (through a UAC prompt) when CE's folder is not writable
 if (process.argv[2] === 'write-loader') {
@@ -37,6 +38,7 @@ async function stop(): Promise<void> {
   stopping = true;
   // A tool call stuck on CE must not keep the process alive: give the release 3 s at most
   await Promise.race([session.release(), new Promise((resolve) => setTimeout(resolve, 3000))]);
+  winHelper.stop();
   process.exit(0);
 }
 

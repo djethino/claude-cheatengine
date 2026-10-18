@@ -105,11 +105,32 @@ local function startServer()
     return true
   end
 
+  -- CE has no way to close a Lua server: once opened, a stop only marks it stopped
+  if CEMCP.serverOpened then
+    CEMCP.running = true
+    log("Server resumed on pipe: \\\\.\\pipe\\" .. CONFIG.pipeName)
+    updateMenuState()
+    return true
+  end
+
+  -- Two Cheat Engines serving the same pipe would each get some of Claude Code's calls (an unlock
+  -- in one, the lock in the other): stay off while another one serves it
+  local probe = connectToPipe(CONFIG.pipeName, 500)
+  if probe then
+    probe.destroy()
+    CEMCP.otherInstance = true
+    updateMenuState()
+    notify("MCP server not started: another Cheat Engine already serves Claude Code. Close it (then use Start Server in the MCP menu), or work in that one.")
+    return false
+  end
+  CEMCP.otherInstance = false
+
   local success, err = pcall(function()
     openLuaServer(CONFIG.pipeName)
   end)
 
   if success then
+    CEMCP.serverOpened = true
     CEMCP.running = true
     CEMCP.commandCount = 0
     log("Server started on pipe: \\\\.\\pipe\\" .. CONFIG.pipeName)
@@ -204,7 +225,7 @@ function createStatusLabel()
     CEMCP.statusLabel.Font.Style = "fsBold"
     CEMCP.statusLabel.BevelOuter = "bvNone"
     CEMCP.statusLabel.Align = "alRight"
-    CEMCP.statusLabel.Width = 100
+    CEMCP.statusLabel.Width = 160
     CEMCP.statusLabel.Alignment = "taCenter"
     log("Status indicator added to status bar")
   else
@@ -237,7 +258,11 @@ end
 function updateStatusLabel()
   if not CEMCP.statusLabel then return end
 
-  if CEMCP.isUnsafe then
+  if not CEMCP.running then
+    CEMCP.statusLabel.Caption = CEMCP.otherInstance and " MCP: OFF (other CE) " or " MCP: OFF "
+    CEMCP.statusLabel.Font.Color = 0x555555  -- Gray
+    CEMCP.statusLabel.Color = 0xDDDDDD
+  elseif CEMCP.isUnsafe then
     CEMCP.statusLabel.Caption = " MCP: UNSAFE "
     CEMCP.statusLabel.Font.Color = 0x0000FF  -- Red (BGR format)
     CEMCP.statusLabel.Color = 0xCCCCFF      -- Light red background

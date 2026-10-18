@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { CEPipeError } from './ce/pipe.js';
-import { OwnershipError, type Session } from './ce/session.js';
+import { OwnershipError, type Scope, type Session } from './ce/session.js';
 import { readOnly } from './options.js';
 import { isErrorText, resolveFlag, type Args, type ImageResult, type ToolContext, type ToolDef } from './tools/registry.js';
 import { logger } from './logger.js';
@@ -28,6 +28,21 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
   const dangerous = resolveFlag(tool.dangerous, args);
   const call = { tool: tool.name, args: summarize(args) };
   const progressToken = extra._meta?.progressToken;
+  const progress = async (done: number, total: number | undefined, message: string): Promise<void> => {
+    if (progressToken === undefined) return;
+    await extra.sendNotification({
+      method: 'notifications/progress',
+      params: { progressToken, progress: done, ...(total !== undefined && { total }), message },
+    });
+  };
+
+  if (tool.outsideCE) {
+    const unavailable = (): never => {
+      throw new Error(`${tool.name} works outside CE: it cannot run CE code`);
+    };
+    const scope = new Proxy({} as Scope, { get: unavailable });
+    return tool.run(args, { scope, signal: extra.signal, run: unavailable, progress, ceWindow: () => session.ceWindow });
+  }
 
   try {
     return await session.exclusive(call, (scope) => {
@@ -36,13 +51,8 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
         signal: extra.signal,
         run: (body, options) =>
           scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
-        async progress(done, total, message) {
-          if (progressToken === undefined) return;
-          await extra.sendNotification({
-            method: 'notifications/progress',
-            params: { progressToken, progress: done, ...(total !== undefined && { total }), message },
-          });
-        },
+        progress,
+        ceWindow: () => session.ceWindow,
       };
       return tool.run(args, ctx);
     });
