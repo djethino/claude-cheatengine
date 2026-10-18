@@ -409,7 +409,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_static',
-    description: `Read the static fields of a class (singletons like Player.Instance, game managers): one call to the collector for the static data address, then plain memory reads.`,
+    description: `Read the static fields of a class (singletons like Player.Instance, game managers). Mono: one call to the collector for the static data address, then plain memory reads. IL2CPP: each field is read by the collector; struct-typed static fields are not read (they would overflow the collector's buffer in the game).`,
     schema: {
       class_name: classArg,
       field_name: z.string().default('').describe('Only this static field (default: all of them)'),
@@ -473,7 +473,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_find_instances',
-    description: `Find the objects of a class in memory: a read-only memory scan for the class's vtable pointer (every object starts with it), never a walk of the managed heap. Runs in the background with a progress window.
+    description: `Find the objects of a class in memory: a read-only memory scan for the pointer every object starts with (the class's vtable with Mono, the class itself with IL2CPP), never a walk of the managed heap. Runs in the background with a progress window.
 
 Recently freed objects can still match until the GC reuses their memory: check a result with ce_mono_dump.`,
     schema: {

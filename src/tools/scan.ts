@@ -55,7 +55,7 @@ const scanName = z
   .string()
   .regex(/^[A-Za-z0-9_-]{1,32}$/)
   .default('main')
-  .describe('Name of the scan, to run several scans side by side (default "main")');
+  .describe('Name of the scan, to run several scans side by side');
 
 /**
  * Lua: the scan named `name` into locals `s` (state) and `ms` (memscan), or report and return.
@@ -156,17 +156,9 @@ function firstScan(spec: FirstScan): LuaCode {
 export const scanTools = [
   defineTool({
     name: 'ce_scan_value',
-    description: `Start a new memory scan for a value. This is the first step in finding memory addresses.
+    description: `Start a new memory scan for a value: the usual first step to find a game value (health, gold, ammo...), simpler than the ce_mono_* tools when the class structure is unknown.
 
-RECOMMENDED FIRST APPROACH: Use this before trying ce_mono_* functions.
-For finding game values (health, gold, ammo, strings), scanning is simpler than
-reverse engineering class structures.
-
-The scan runs in the background (CE shows its progress); up to 10 results are listed directly.
-Then: change the value in the game and refine with ce_scan_next.
-
-ERROR HANDLING:
-- If scan hangs or returns no results after 2-3 attempts, STOP and ask user`,
+The scan runs in the background (CE shows its progress); up to 10 results are listed directly. Then change the value in the game and refine with ce_scan_next. When repeated scans find nothing, the value may be stored differently (float, scaled, encrypted): ask the user rather than guess.`,
     schema: {
       value: z.string().default('').describe("Value to search for, e.g. '100' or '3.14' (not needed for scan_type 'unknown')"),
       value_type: z.enum(Object.keys(VAR_TYPES) as [keyof typeof VAR_TYPES]).default('int32').describe("Value type; 'all' = int32, float and double at once"),
