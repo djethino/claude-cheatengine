@@ -17,7 +17,7 @@ Everything runs on your machine: the plugin talks to Cheat Engine through a loca
 
 - Windows
 - **Cheat Engine 7.7 or later** (the plugin refuses older versions: it relies on 7.7's scan API)
-- **Node.js 22.13 or later** on your `PATH` (`node --version`)
+- **Node.js 22 or later** on your `PATH` (`node --version`). Built for Node 22; tested on the latest Node 22 (CI) and on Node 23
 - Claude Code
 
 ## Installation
