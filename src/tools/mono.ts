@@ -50,24 +50,38 @@ const MONO_HELPERS = raw(`
     return nil, 'class ' .. full .. ' not found in ' .. asm
   end
   local function fieldsOf(klass) return mono_class_enumFields(klass, true) or {} end
-  local function readValue(address, field)
-    -- References as 0x pointers (CE's readers give bare hex, sometimes zero-padded)
-    if REF_TYPES[field.monotype] or field.monotype == 0x18 then
-      local p = readPointer(address)
-      return p and string.format('0x%X', p) or '??'
-    end
-    local reader = getDotNetValueReader and getDotNetValueReader(field.monotype)
-    if reader then
-      local ok, v = pcall(reader, address, field)
-      if ok and v ~= nil then return tostring(v) end
-    end
-    local p = readPointer(address)
-    return p and string.format('0x%X', p) or '??'
+  local function shortType(typename) return ((typename or ''):gsub('^System%.', '')) end
+  -- Primitive types: memory format (little endian)
+  local FORMATS = { Boolean = '<I1', Byte = '<I1', SByte = '<i1', Int16 = '<i2', UInt16 = '<I2', Char = '<I2', Int32 = '<i4',
+    UInt32 = '<I4', Int64 = '<i8', UInt64 = '<I8', Single = '<f', Double = '<d' }
+  -- Raw integer of a primitive type's memory (zero-extended, as the IL2CPP collector returns it)
+  local function readRaw(address, size)
+    local b = readBytes(address, size, true)
+    if not b then return nil end
+    return (string.unpack('<i8', string.char(table.unpack(b)) .. string.rep('\\0', 8 - size)))
   end
-  -- A static field's value. Mono: the class's static data address + the field offset, read from
-  -- memory. IL2CPP: the collector gives no static data address, so it reads each field (8 raw bytes)
+  -- A primitive value given as text, packed in its memory format, or nil and why
+  local function packValue(text, typename)
+    local t = shortType(typename)
+    local fmt = FORMATS[t]
+    if not fmt then return nil, 'only primitive fields (numbers, booleans) can be written, not ' .. tostring(typename) end
+    local v
+    if t == 'Boolean' then
+      local l = text:lower()
+      v = (l == 'true' or l == '1') and 1 or (l == 'false' or l == '0') and 0 or nil
+    elseif t == 'Single' or t == 'Double' then
+      v = tonumber(text)
+    else
+      v = math.tointeger(tonumber(text))
+    end
+    if v == nil then return nil, string.format('%s is not a valid %s', text, t) end
+    local ok, packed = pcall(string.pack, fmt, v)
+    if not ok then return nil, string.format('%s does not fit in a %s', text, t) end
+    return packed
+  end
+  -- A raw integer (8 bytes, little endian) formatted as the given primitive type
   local function rawValue(v, typename)
-    local t = (typename or ''):gsub('^System%.', '')
+    local t = shortType(typename)
     if v == nil then return '??' end
     if t == 'Boolean' then return tostring(v & 0xFF ~= 0) end
     if t == 'Byte' then return tostring(v & 0xFF) end
@@ -82,12 +96,112 @@ const MONO_HELPERS = raw(`
     if t == 'Double' then return string.format('%.17g', string.unpack('<d', string.pack('<i8', v))) end
     return string.format('0x%X', v)
   end
+  -- ACTk obscured values (CodeStage.AntiCheat.ObscuredTypes.Obscured<Kind>): a struct whose
+  -- hiddenValue is the value XOR currentCryptoKey. While ACTk's ObscuredCheatingDetector runs,
+  -- fakeValue holds the plain value as a honeypot and a read that differs from it is reported as
+  -- cheating: it is checked (it proves the decoding) and written together with hiddenValue.
+  local OBSCURED = { Int = 'Int32', UInt = 'UInt32', Short = 'Int16', UShort = 'UInt16', Byte = 'Byte', SByte = 'SByte',
+    Long = 'Int64', ULong = 'UInt64', Char = 'Char', Float = 'Single', Double = 'Double' }
+  local function obscuredOf(field)
+    local kind = (field.typename or ''):match('ObscuredTypes%.Obscured(%a+)$')
+    if not kind then return nil end
+    local o = { kind = kind, plain = OBSCURED[kind], parts = {} }
+    -- The struct's field offsets count the object header of its boxed form
+    local header = targetIs64Bit() and 0x10 or 8
+    for _, f in ipairs(fieldsOf(mono_field_getClass(field.field))) do
+      local fmt = FORMATS[shortType(f.typename)]
+      if not f.isStatic and fmt then o.parts[f.name] = { offset = f.offset - header, typename = f.typename, size = string.packsize(fmt) } end
+    end
+    if not (o.plain and o.parts.hiddenValue and o.parts.currentCryptoKey) then o.why = 'ACTk Obscured' .. kind .. ': unsupported type or layout' end
+    return o
+  end
+  local function partRaw(address, part) return readRaw(address + part.offset, part.size) end
+  -- Decoded value of the obscured struct at address, and whether its honeypot confirmed it; nil and why
+  local function obscuredRead(address, o)
+    if o.why then return nil, o.why end
+    local p = o.parts
+    if p.inited and partRaw(address, p.inited) == 0 then return nil, 'ACTk Obscured' .. o.kind .. ': not initialized yet' end
+    local hidden, key = partRaw(address, p.hiddenValue), partRaw(address, p.currentCryptoKey)
+    if not hidden or not key then return nil, 'unreadable' end
+    local value = rawValue(hidden ~ key, o.plain)
+    if not (p.fakeValue and p.fakeValueActive and partRaw(address, p.fakeValueActive) ~= 0) then return value, false end
+    local fake = rawValue(partRaw(address, p.fakeValue), p.fakeValue.typename)
+    local a, b = tonumber(value), tonumber(fake)
+    if fake == value or (a and b and math.abs(a - b) < 1e-4) then return value, true end
+    return nil, string.format('ACTk Obscured%s: XOR decoding gives %s but its honeypot holds %s (unknown encoding)', o.kind, value, fake)
+  end
+  local function readValue(address, field)
+    local o = obscuredOf(field)
+    if o then
+      local v, checked = obscuredRead(address, o)
+      if not v then return '?? (' .. checked .. ')' end
+      return string.format('%s (ACTk Obscured%s%s)', v, o.kind, checked and ', checked against its honeypot' or '')
+    end
+    -- References as 0x pointers (CE's readers give bare hex, sometimes zero-padded)
+    if REF_TYPES[field.monotype] or field.monotype == 0x18 then
+      local p = readPointer(address)
+      return p and string.format('0x%X', p) or '??'
+    end
+    local reader = getDotNetValueReader and getDotNetValueReader(field.monotype)
+    if reader then
+      local ok, v = pcall(reader, address, field)
+      if ok and v ~= nil then return tostring(v) end
+    end
+    local p = readPointer(address)
+    return p and string.format('0x%X', p) or '??'
+  end
+  -- Write a value given as text (primitive or obscured) at address; nil, or why it was not written
+  local function writeValue(address, field, text)
+    local o = obscuredOf(field)
+    if not o then
+      local packed, why = packValue(text, field.typename)
+      if not packed then return why end
+      if not writeBytes(address, { packed:byte(1, -1) }) then return string.format('write failed at 0x%X', address) end
+      return nil
+    end
+    local current, checked = obscuredRead(address, o)
+    if not current then return checked end
+    if not checked and (o.plain == 'Single' or o.plain == 'Double') then
+      return 'ACTk Obscured' .. o.kind .. ': its encoding is only trusted once checked against its honeypot, inactive here (ACTk detector not running): not written'
+    end
+    local packed, why = packValue(text, o.plain)
+    if not packed then return why end
+    local p = o.parts
+    local plain = string.unpack('<i8', packed .. string.rep('\\0', 8 - #packed))
+    local changes = { { p.hiddenValue, string.pack('<i8', plain ~ partRaw(address, p.currentCryptoKey)):sub(1, p.hiddenValue.size) } }
+    if p.fakeValue then
+      local fake, why = packValue(text, p.fakeValue.typename)
+      if not fake then return why end
+      changes[2] = { p.fakeValue, fake }
+    end
+    -- One write for both, so that the game never reads a hidden value and a honeypot that differ
+    local first, last = math.huge, 0
+    for _, c in ipairs(changes) do first, last = math.min(first, c[1].offset), math.max(last, c[1].offset + c[1].size) end
+    local bytes = readBytes(address + first, last - first, true)
+    if not bytes then return string.format('cannot read 0x%X', address + first) end
+    for _, c in ipairs(changes) do
+      for i = 1, c[1].size do bytes[c[1].offset - first + i] = c[2]:byte(i) end
+    end
+    if not writeBytes(address + first, bytes) then return string.format('write failed at 0x%X', address + first) end
+    return nil
+  end
+  -- A static field's value. Mono: the class's static data address + the field offset, read from
+  -- memory. IL2CPP: the collector gives no static data address; it reads a field into 8 bytes
   local staticBase
-  local function staticValue(klass, field)
-    if mono_isil2cpp() then return rawValue(mono_getStaticFieldValue(klass, field.field), field.typename) end
+  local function staticAddress(klass, field)
     if staticBase == nil then staticBase = mono_class_getStaticFieldAddress(0, klass) or false end
-    if not staticBase then return '?? (no static data: class not initialized yet?)' end
-    return readValue(staticBase + field.offset, field)
+    return staticBase and staticBase + field.offset or nil
+  end
+  local function il2cppStaticFits(field) return FORMATS[shortType(field.typename)] or REF_TYPES[field.monotype] or field.monotype == 0x18 end
+  local function staticValue(klass, field)
+    if mono_isil2cpp() then
+      -- A larger value (a struct) would overflow the collector's 8 bytes inside the game
+      if not il2cppStaticFits(field) then return '?? (IL2CPP: only number, boolean and reference static fields are readable)' end
+      return rawValue(mono_getStaticFieldValue(klass, field.field), field.typename)
+    end
+    local address = staticAddress(klass, field)
+    if not address then return '?? (no static data: class not initialized yet?)' end
+    return readValue(address, field)
   end
 `);
 
@@ -96,6 +210,14 @@ function classLookup(className: string, assembly: string): LuaCode {
   return lua`
     local klass, why = findClass(${className}, ${assembly})
     if not klass then _mcp_str = 'Error: ' .. why return end`;
+}
+
+/** Lua: the field `fieldName` of `klass` into local `field`, or report and return. */
+function fieldLookup(fieldName: string, className: string): LuaCode {
+  return lua`
+    local field
+    for _, f in ipairs(fieldsOf(klass)) do if f.name == ${fieldName} then field = f end end
+    if not field then _mcp_str = 'Error: no field ' .. ${fieldName} .. ' in ' .. ${className} .. ' (see ce_mono_fields)' return end`;
 }
 
 export const monoTools = [
@@ -221,9 +343,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
         lua`
           ${MONO_HELPERS}
           ${classLookup(class_name, assembly)}
-          local field
-          for _, f in ipairs(fieldsOf(klass)) do if f.name == ${field_name} then field = f end end
-          if not field then _mcp_str = 'Error: no field ' .. ${field_name} .. ' in ' .. ${class_name} .. ' (see ce_mono_fields)' return end
+          ${fieldLookup(field_name, class_name)}
           if field.isStatic then
             _mcp_str = string.format('%s.%s (%s, static) = %s', ${class_name}, field.name, field.typename or '?', staticValue(klass, field))
             return
@@ -233,6 +353,54 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
           if not base then _mcp_str = 'Error: invalid address: ' .. ${instance_address} return end
           local address = base + field.offset
           _mcp_str = string.format('%s.%s (%s) at 0x%X = %s', ${class_name}, field.name, field.typename or '?', address, readValue(address, field))`,
+        { timeoutMs: 60_000 },
+      );
+      return text ?? 'Error: no answer from Cheat Engine';
+    },
+  }),
+
+  defineTool({
+    name: 'ce_mono_write_field',
+    description: `Write a field of an object (instance_address) or a static field by name, in its real .NET type: numbers and booleans, and ACTk obscured values (ObscuredInt, ObscuredFloat...) re-encrypted with their key, their honeypot kept equal so ACTk's detector sees nothing. Reports the value before and after.`,
+    schema: {
+      class_name: classArg,
+      field_name: z.string().describe('Field name'),
+      value: z.string().describe('New value, e.g. "100", "-2", "0x10", "2.5", "true"'),
+      instance_address: z.string().default('').describe('Object address (not needed for a static field)'),
+      assembly: assemblyArg,
+    },
+    writes: true,
+    requiresProcess: true,
+    dangerous: ({ instance_address }) => instance_address === '',
+    async run({ class_name, field_name, value, instance_address, assembly }, ctx) {
+      const text = await ctx.run(
+        lua`
+          ${MONO_HELPERS}
+          ${classLookup(class_name, assembly)}
+          ${fieldLookup(field_name, class_name)}
+          if field.isConst then _mcp_str = 'Error: ' .. field.name .. ' is a constant (compiled into the code, not in memory)' return end
+          local address
+          if field.isStatic then
+            if mono_isil2cpp() then
+              local packed, why = packValue(${value}, field.typename)
+              if not packed then _mcp_str = 'Error: IL2CPP static field: ' .. why return end
+              local before = staticValue(klass, field)
+              mono_setStaticFieldValue(klass, field.field, (string.unpack('<i8', packed .. string.rep('\0', 8 - #packed))))
+              _mcp_str = string.format('%s.%s (%s, static): %s -> %s', ${class_name}, field.name, field.typename or '?', before, staticValue(klass, field))
+              return
+            end
+            address = staticAddress(klass, field)
+            if not address then _mcp_str = 'Error: no static data for ' .. ${class_name} .. ' (class not initialized yet?)' return end
+          else
+            if ${instance_address} == '' then _mcp_str = 'Error: ' .. field.name .. ' is an instance field: give instance_address' return end
+            local base = getAddressSafe(${instance_address})
+            if not base then _mcp_str = 'Error: invalid address: ' .. ${instance_address} return end
+            address = base + field.offset
+          end
+          local before = readValue(address, field)
+          local why = writeValue(address, field, ${value})
+          if why then _mcp_str = 'Error: ' .. why return end
+          _mcp_str = string.format('%s.%s (%s) at 0x%X: %s -> %s', ${class_name}, field.name, field.typename or '?', address, before, readValue(address, field))`,
         { timeoutMs: 60_000 },
       );
       return text ?? 'Error: no answer from Cheat Engine';
