@@ -88,11 +88,6 @@ function CEMCP_getLogs(clear)
   return logs
 end
 
--- Clear logs
-function CEMCP_clearLogs()
-  CEMCP_logBuffer = {}
-end
-
 local function notify(message)
   if CONFIG.showNotifications then
     showMessage("[CE-MCP] " .. message)
@@ -385,137 +380,10 @@ function showLogWindow()
 end
 
 --------------------------------------------------------------------------------
--- Breakpoint Handler for MCP
+-- Functions called by the MCP server
 --------------------------------------------------------------------------------
 
--- Persistent storage for breakpoint hits (survives across MCP calls)
-CEMCP_breakpointHits = {}
-CEMCP_activeBreakpoints = {}
-
--- Set a breakpoint with MCP-compatible callback
-function CEMCP_setBreakpoint(address, bpType, size)
-  local addr = getAddress(address)
-  if not addr then
-    return { error = "Invalid address" }
-  end
-
-  -- Clear previous hits for this address
-  CEMCP_breakpointHits[addr] = {}
-
-  local bpTypeMap = {
-    access = bptAccess,
-    write = bptWrite,
-    execute = bptExecute
-  }
-  local bp = bpTypeMap[bpType] or bptAccess
-
-  debug_setBreakpoint(addr, size or 4, bp, function()
-    -- All code in pcall to catch any errors
-    local ok, err = pcall(function()
-      -- RIP/EIP are global variables set by CE when breakpoint hits
-      local rip = RIP or EIP or 0
-      local disasmText = "unknown"
-
-      -- Disassemble the instruction (safely)
-      if rip ~= 0 then
-        local dok, dresult = pcall(disassemble, rip)
-        if dok and dresult then
-          disasmText = dresult
-        end
-      end
-
-      -- Capture registers (64-bit with 32-bit fallback)
-      local hit = {
-        address = rip,
-        disasm = disasmText,
-        regs = {
-          rax = RAX or EAX or 0,
-          rbx = RBX or EBX or 0,
-          rcx = RCX or ECX or 0,
-          rdx = RDX or EDX or 0,
-          rsi = RSI or ESI or 0,
-          rdi = RDI or EDI or 0,
-          rbp = RBP or EBP or 0,
-          rsp = RSP or ESP or 0,
-        }
-      }
-
-      -- Store in our persistent table
-      if not CEMCP_breakpointHits[addr] then
-        CEMCP_breakpointHits[addr] = {}
-      end
-      table.insert(CEMCP_breakpointHits[addr], hit)
-    end)
-
-    if not ok then
-      print('[CE-MCP] BP callback error: ' .. tostring(err))
-    end
-
-    -- Remove after 20 hits to prevent memory bloat
-    if #CEMCP_breakpointHits[addr] >= 20 then
-      debug_removeBreakpoint(addr)
-      CEMCP_activeBreakpoints[addr] = nil
-      log("Breakpoint auto-removed after 20 hits")
-    end
-
-    return 0  -- Continue execution without pausing (0=continue, 1=break)
-  end)
-
-  CEMCP_activeBreakpoints[addr] = true
-  log(string.format("Breakpoint set at 0x%X (%s, %d bytes)", addr, bpType, size or 4))
-
-  return { success = true, address = addr }
-end
-
--- Get breakpoint hits
-function CEMCP_getBreakpointHits(address)
-  if address then
-    local addr = getAddress(address)
-    return CEMCP_breakpointHits[addr] or {}
-  else
-    -- Return all hits
-    local allHits = {}
-    for addr, hits in pairs(CEMCP_breakpointHits) do
-      for _, hit in ipairs(hits) do
-        hit.targetAddress = addr
-        table.insert(allHits, hit)
-      end
-    end
-    return allHits
-  end
-end
-
--- Clear breakpoint hits
-function CEMCP_clearBreakpointHits(address)
-  if address then
-    local addr = getAddress(address)
-    CEMCP_breakpointHits[addr] = {}
-  else
-    CEMCP_breakpointHits = {}
-  end
-end
-
--- Remove a breakpoint
-function CEMCP_removeBreakpoint(address)
-  if address then
-    local addr = getAddress(address)
-    debug_removeBreakpoint(addr)
-    CEMCP_activeBreakpoints[addr] = nil
-    CEMCP_breakpointHits[addr] = nil
-  else
-    debug_removeBreakpoint()
-    CEMCP_activeBreakpoints = {}
-    CEMCP_breakpointHits = {}
-  end
-end
-
---------------------------------------------------------------------------------
--- Enhanced Lua Functions for MCP
---------------------------------------------------------------------------------
-
--- These functions provide better formatted output for MCP consumption
-
--- Called by MCP server to log commands to CE console
+-- Log a command to the CE console and the MCP log window
 function CEMCP_logCommand(toolName, args)
   CEMCP.commandCount = CEMCP.commandCount + 1
   CEMCP.lastCommandTime = os.time()
@@ -527,125 +395,27 @@ function CEMCP_logCommand(toolName, args)
   updateMenuState()
 end
 
--- Check if writes are allowed (called by MCP for verification)
-function CEMCP_isUnsafe()
-  return checkUnsafeMode()
-end
-
--- Get current security mode as string
-function CEMCP_getSecurityMode()
-  checkUnsafeMode()
-  return CEMCP.isUnsafe and "unsafe" or "safe"
-end
-
-function CEMCP_getProcessInfo()
-  local pid = getOpenedProcessID()
-  if not pid or pid == 0 then
-    return { attached = false }
-  end
-
-  return {
-    attached = true,
-    pid = pid,
-    is64bit = targetIs64Bit(),
-    processName = process or "Unknown"
-  }
-end
-
-function CEMCP_readMemoryTable(address, dataType, count)
-  count = count or 1
-  local results = {}
-  local addr = getAddress(address)
-
-  if not addr then
-    return { error = "Invalid address: " .. tostring(address) }
-  end
-
-  local readFunc = {
-    byte = readBytes,
-    int16 = readSmallInteger,
-    int32 = readInteger,
-    int64 = readQword,
-    float = readFloat,
-    double = readDouble,
-  }
-
-  local func = readFunc[dataType]
-  if not func then
-    return { error = "Unknown type: " .. tostring(dataType) }
-  end
-
-  local size = ({ byte=1, int16=2, int32=4, int64=8, float=4, double=8 })[dataType]
-
-  for i = 1, count do
-    local value = func(addr + (i-1) * size)
-    table.insert(results, {
-      address = string.format("0x%X", addr + (i-1) * size),
-      value = value
-    })
-  end
-
-  return results
-end
-
-function CEMCP_scanValue(valueType, value, startAddr, stopAddr)
-  -- Map valueType string to CE variable type constant
-  local vtMap = {
-    byte = vtByte,
-    int8 = vtByte,
-    int16 = vtWord,
-    int32 = vtDword,
-    int64 = vtQword,
-    float = vtSingle,
-    double = vtDouble,
-    string = vtString,
-    aob = vtByteArray,
-  }
-  local vt = vtMap[valueType] or vtDword
-
-  -- Configure scan
-  local ms = getMemScan()
-  if not ms then
-    ms = createMemScan()
-  end
-
-  ms.firstScan(
-    soExactValue,           -- Scan option
-    vt,                     -- Variable type (mapped from valueType)
-    rtRounded,              -- Round type
-    value,                  -- Value to find
-    nil,                    -- Second value (for between scans)
-    startAddr or 0,         -- Start address
-    stopAddr or 0x7FFFFFFF, -- Stop address
-    "*X*W",                 -- Protection flags
-    fsmNotAligned,          -- Fast scan method
-    nil,                    -- Fast scan alignment
-    false,                  -- Hex input
-    false,                  -- Unicode
-    false                   -- Case sensitive
-  )
-
-  ms.waitTillDone()
-
-  local fl = createFoundList(ms)
-  fl.initialize()
-
-  local results = {}
-  for i = 0, math.min(fl.Count - 1, 100) do
-    table.insert(results, fl.Address[i])
-  end
-
-  fl.destroy()
-
-  return results
-end
-
 --------------------------------------------------------------------------------
 -- Initialization
 --------------------------------------------------------------------------------
 
+-- FNV-1a (32-bit) of this script's own file: the MCP server compares it with the copy it ships,
+-- to tell the user to restart CE when CE still runs an older plugin script
+local function scriptHash()
+  local source = debug.getinfo(1, 'S').source
+  if source:sub(1, 1) ~= '@' then return nil end
+  local f = io.open(source:sub(2), 'rb')
+  if not f then return nil end
+  local data = f:read('a')
+  f:close()
+  local h = 2166136261
+  for i = 1, #data do h = ((h ~ data:byte(i)) * 16777619) & 0xFFFFFFFF end
+  return h
+end
+
 local function initialize()
   log("Initializing CE-MCP plugin...")
+  CEMCP.scriptHash = scriptHash()
 
   -- Create menu (delayed to ensure main form is ready)
   createTimer().OnTimer = function(timer)

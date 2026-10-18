@@ -85,6 +85,7 @@ export async function runJob(ctx: ToolContext, kind: string, spec: LuaCode, wait
 export const jobTools = [
   defineTool({
     name: 'ce_job_status',
+    antiCheatExempt: true,
     description: 'Progress or result of a CE job started with wait=false (or one that outlived its call). Returns the result once done.',
     schema: {
       job_id: z.number().int().min(1).describe('Job id given when the job started'),
@@ -105,6 +106,7 @@ export const jobTools = [
 
   defineTool({
     name: 'ce_job_cancel',
+    antiCheatExempt: true,
     description: 'Cancel a running CE job (the user can also press Cancel in its progress window in CE).',
     schema: {
       job_id: z.number().int().min(1).describe('Job id'),
@@ -121,6 +123,7 @@ export const jobTools = [
 
   defineTool({
     name: 'ce_job_list',
+    antiCheatExempt: true,
     description: 'List the CE jobs that are running or whose result has not been read yet.',
     schema: {},
     writes: false,

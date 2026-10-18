@@ -20,7 +20,7 @@ export type Args<S extends Shape> = z.objectOutputType<S, z.ZodTypeAny>;
 
 export interface ToolContext {
   /** Run a tool body in CE with this tool's gates; returns the text it left in _mcp_str. */
-  run(body: LuaCode, options?: Omit<RunOptions, 'dangerous' | 'requiresProcess'>): Promise<string | null>;
+  run(body: LuaCode, options?: Omit<RunOptions, 'dangerous' | 'requiresProcess' | 'antiCheatGate'>): Promise<string | null>;
   scope: Scope;
   /** Report progress to the client (shown by Claude Code for long calls). */
   progress(done: number, total: number | undefined, message: string): Promise<void>;
@@ -40,6 +40,12 @@ export interface ToolDef<S extends Shape = Shape> {
   writes: boolean | ((args: Args<S>) => boolean);
   dangerous?: boolean | ((args: Args<S>) => boolean);
   requiresProcess?: boolean;
+  /**
+   * Allowed on a process with an anti-cheat: the tool does not touch the process (status,
+   * logs, safety, jobs, screenshots...) or only stops something (unfreeze, remove a watchpoint).
+   * Every other tool is refused there until UNSAFE mode is on (src/anticheat.ts).
+   */
+  antiCheatExempt?: boolean;
   run(args: Args<S>, ctx: ToolContext): Promise<string | ImageResult>;
 }
 

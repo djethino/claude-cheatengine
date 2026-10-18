@@ -104,6 +104,13 @@ export async function findCeDirs(): Promise<string[]> {
   return found;
 }
 
+/** FNV-1a (32-bit) of the shipped plugin script, as the plugin computes it on its own file in CE. */
+export function pluginScriptHash(): number {
+  let h = 2166136261;
+  for (const byte of Buffer.from(pluginScript, 'utf8')) h = Math.imul(h ^ byte, 16777619) >>> 0;
+  return h;
+}
+
 /** Copy the plugin's Lua script to the per-user folder when it differs. Returns true if written. */
 export function syncUserScript(): boolean {
   if (existsSync(USER_SCRIPT) && readFileSync(USER_SCRIPT, 'utf8') === pluginScript) return false;

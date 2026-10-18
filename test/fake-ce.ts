@@ -9,6 +9,9 @@
 
 import { createServer, type Server, type Socket } from 'net';
 import { initLua, LuaVM, type LuaResult } from './lua-vm.js';
+import memscanStub from './fake/memscan.lua';
+import addressListStub from './fake/addresslist.lua';
+import monoStub from './fake/mono.lua';
 
 const CE_STUBS = `
 __fake = { pid = 0, logs = {}, prints = {} }
@@ -18,26 +21,42 @@ function openProcess(p) __fake.pid = type(p) == 'number' and p or 4242 return tr
 function print(...) local t = table.pack(...) for i = 1, t.n do t[i] = tostring(t[i]) end __fake.prints[#__fake.prints + 1] = table.concat(t, ' ') end
 function CEMCP_logCommand(tool, args) __fake.logs[#__fake.logs + 1] = tool .. ' ' .. tostring(args) end
 function updateMenuState() end
+-- Confirmation dialogs: the "user" answers __fake.dialogAnswer (Yes by default)
+mrYes, mrNo, mtWarning, mbYes, mbNo = 6, 7, 1, 4, 8
+__fake.dialogs = {}
+function messageDialog(title, text, ...) __fake.dialogs[#__fake.dialogs + 1] = text return __fake.dialogAnswer or mrYes end
 
 -- Simulated target: sparse byte memory, one module "game.exe" at 0x400000 (size 0x1000)
 __fake.mem = {}
 process = 'game.exe'
 function targetIs64Bit() return true end
 function getModuleSize(name) if name == 'game.exe' then return 0x1000 end end
-function enumModules() return { { Name = 'game.exe', Address = 0x400000, Size = 0x1000 }, { Name = 'other.dll', Address = 0x800000, Size = 0x100 } } end
+-- Running processes by PID (4242 = game.exe); a test can add modules, e.g. an anti-cheat DLL
+__fake.processes = { ['game.exe'] = 4242, ['protected.exe'] = 5555 }
+__fake.extraModules = { [5555] = { { Name = 'EasyAntiCheat_x64.dll', Address = 0x900000, Size = 0x100 } } }
+function getProcessIDFromProcessName(name) return __fake.processes[name] end
+function enumModules(pid)
+  local list = { { Name = 'game.exe', Address = 0x400000, Size = 0x1000, PathToFile = 'C:/nowhere/game.exe' },
+                 { Name = 'other.dll', Address = 0x800000, Size = 0x100 } }
+  for _, m in ipairs(__fake.extraModules[pid or __fake.pid] or {}) do list[#list + 1] = m end
+  return list
+end
 function enumMemoryRegions() return { { BaseAddress = 0x400000, RegionSize = 0x1000, Protect = 0x20 }, { BaseAddress = 0x500000, RegionSize = 0x2000, Protect = 0x104 } } end
 function getAddressSafe(s)
   if type(s) == 'number' then return s end
   if s == 'game.exe' then return 0x400000 end
   local m, off = s:match('^(game%.exe)%+(%w+)$')
   if m then return 0x400000 + tonumber(off, 16) end
-  return tonumber(s)
+  -- Like CE, a bare number is hexadecimal ('00400304', the format of FoundList addresses)
+  return tonumber((s:gsub('^0[xX]', '')), 16)
 end
 function getNameFromAddress(a)
   if a >= 0x400000 and a < 0x401000 then return string.format('game.exe+%X', a - 0x400000) end
   return string.format('%X', a)
 end
+-- Mapped memory: the module (0x400000-0x401000), then heap up to 0x402000
 local function mapped(a) return a >= 0x400000 and a < 0x402000 end
+function inModule(a) return a >= 0x400000 and a < 0x401000 end
 function readBytes(a, n, asTable)
   local t = {}
   for i = 0, n - 1 do
@@ -85,6 +104,7 @@ end
 function writeString(a, s) return writeBytes(a, { s:byte(1, -1) }) end
 function disassemble(a) return string.format('%X - 90 - nop', a) end
 function getInstructionSize(a) return 1 end
+function splitDisassembledString(s) local a, b, o = s:match('^(%x+) %- (.-) %- (.*)$') return a, b, o, '' end
 local function stringlist(items)
   local o = { Count = #items, destroy = function() end }
   for i, v in ipairs(items) do o[i - 1] = v end
@@ -110,15 +130,15 @@ function __fake.stepThreads()
 end
 -- A job's thread can call this to wait for the next step
 function __fake.yield() if coroutine.isyieldable() then coroutine.yield() end end
+-- Time passes only when a thread sleeps; __fake.onSleep (if set) plays the game meanwhile
+__fake.tick = 0
+function getTickCount() return __fake.tick end
+function sleep(ms) __fake.tick = __fake.tick + ms if __fake.onSleep then __fake.onSleep(__fake.tick) end __fake.yield() end
 caHide = 1
 function createTimer() return { Interval = 1000, Enabled = true } end
 local function control() return { destroy = function() __fake.windows = (__fake.windows or 1) - 1 end, show = function() __fake.windows = (__fake.windows or 0) + 1 end } end
 function createForm() return control() end
 createLabel, createProgressBar, createButton = control, control, control
-function AOBScan(pattern, prot)
-  __fake.lastAob = { pattern = pattern, prot = prot }
-  return stringlist({ '400010', '400020', '800010' })
-end
 `;
 
 // lua_tointeger() of the script's result, as a decimal string (exact on 64 bits)
@@ -165,6 +185,7 @@ export class FakeCE {
     this.vm?.close();
     this.vm = new LuaVM();
     this.vm.run(CE_STUBS);
+    for (const stub of [memscanStub, addressListStub, monoStub]) this.vm.run(stub);
   }
 
   /** Evaluate a Lua expression in the fake CE's state (test assertions). */

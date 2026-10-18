@@ -220,6 +220,7 @@ Either an existing record (record) or an address (a new record is created). The 
 
   defineTool({
     name: 'ce_unfreeze',
+    antiCheatExempt: true,
     description: 'Unfreeze a record (or every frozen value when no record is given). Scripts are left as they are.',
     schema: { record: recordId.optional() },
     writes: false,

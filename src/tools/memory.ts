@@ -6,6 +6,9 @@ import { z } from 'zod';
 import { lua, raw, type LuaCode } from '../lua/lit.js';
 import { defineTool } from './registry.js';
 import { listBody, pageSchema } from './list.js';
+import { ANTI_CHEAT_ADVICE } from '../anticheat.js';
+import { runJob, waitSchema } from './jobs.js';
+
 
 /** Lua that resolves an address expression into the local `addr`, or reports it and returns. */
 export function resolveAddress(expression: string, local = 'addr'): LuaCode {
@@ -87,6 +90,7 @@ const addressDescription = "Memory address: hex like '0x12345678', symbol like '
 export const memoryTools = [
   defineTool({
     name: 'ce_attach',
+    antiCheatExempt: true,
     description: 'Attach to a process by name or PID.',
     schema: {
       process: z.string().describe("Process name (e.g., 'game.exe') or PID as a decimal string"),
@@ -94,17 +98,32 @@ export const memoryTools = [
     writes: false,
     async run({ process }, ctx) {
       const target = /^\d+$/.test(process.trim()) ? BigInt(process.trim()) : process;
+      // Check for an anti-cheat before CE even opens the process (opening it can be detected)
+      const pidText = await ctx.run(lua`
+        local t = ${target}
+        local pid = type(t) == 'number' and t or getProcessIDFromProcessName(t)
+        _mcp_str = tostring(pid or 0) .. ' ' .. tostring(_mcp_unsafe == true)`);
+      const [pid, unsafe] = (pidText ?? '0 false').split(' ');
+      if (!Number(pid)) return `Error: no running process named ${process} (see ce_list_processes)`;
+      const antiCheats = await ctx.scope.antiCheatOf(Number(pid));
+      if (antiCheats.length && unsafe !== 'true') {
+        return `BLOCKED: not attached. Anti-cheat detected in ${process}: ${antiCheats.join(', ')}. ${ANTI_CHEAT_ADVICE}`;
+      }
+      const warning = antiCheats.length
+        ? `\nWARNING: anti-cheat present (${antiCheats.join(', ')}); UNSAFE mode is on, so the user accepted the ban risk`
+        : '';
       const text = await ctx.run(lua`
-        openProcess(${target})
-        local pid = getOpenedProcessID() or 0
-        if pid == 0 then _mcp_str = 'Error: could not open process ' .. tostring(${target}) return end
-        _mcp_str = string.format('Attached to PID: %d (%s, %s)', pid, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
-      return text ?? 'Error: no answer from Cheat Engine';
+        openProcess(${BigInt(pid)})
+        local opened = getOpenedProcessID() or 0
+        if opened ~= ${BigInt(pid)} then _mcp_str = 'Error: could not open process ' .. ${process} return end
+        _mcp_str = string.format('Attached to PID: %d (%s, %s)', opened, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
+      return (text ?? 'Error: no answer from Cheat Engine') + (text?.startsWith('Error:') ? '' : warning);
     },
   }),
 
   defineTool({
     name: 'ce_list_processes',
+    antiCheatExempt: true,
     description: 'List running processes (paginated).',
     schema: pageSchema(100),
     writes: false,
@@ -283,48 +302,65 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
   }),
 
   defineTool({
-    name: 'ce_aob_scan',
-    description: `Scan memory for an array of bytes pattern (paginated).
-
-The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
+    name: 'ce_sample_value',
+    description: `Read a value repeatedly for a while (in the background, with a progress window) and report how it moved: first/last/min/max and every change with its time. To see what a value does while the game runs (a timer, a regenerating stat, a value that changes only on some event).`,
     schema: {
-      pattern: z.string().describe("Byte pattern with wildcards, e.g. '89 45 ?? 8B 4D'"),
-      module: z.string().default('').describe('Only keep results inside this module (e.g. "game.exe")'),
-      protection: z
-        .string()
-        .regex(/^[+\-*XWC]*$/)
-        .default('')
-        .describe('CE protection flags: X executable, W writable, C copy-on-write; + required, - excluded. "+X-C-W" = code only. Default: all memory'),
-      offset: pageSchema(50).offset,
-      limit: pageSchema(50).limit,
+      address: z.string().describe(addressDescription),
+      type: z.enum(VALUE_TYPES).default('int32').describe('Data type of the value'),
+      duration_ms: z.number().int().min(100).max(600_000).default(5000).describe('How long to watch, in milliseconds'),
+      interval_ms: z.number().int().min(10).max(60_000).default(100).describe('Time between two reads, in milliseconds'),
+      ...waitSchema,
     },
     writes: false,
     requiresProcess: true,
-    async run({ pattern, module, protection, offset, limit }, ctx) {
-      const tokens = pattern.trim().split(/\s+/);
-      if (!tokens.every((t) => /^([0-9a-f]{2}|\?\??)$/i.test(t))) {
-        return `Error: invalid pattern "${pattern}": expected hex bytes and ?? wildcards separated by spaces`;
-      }
-      const moduleFilter = module
-        ? lua`
-          local base = getAddressSafe(${module})
-          local size = base and getModuleSize(${module})
-          if not base or not size then _mcp_str = 'Error: module not found: ' .. ${module} return end
-          inRange = function(a) return a >= base and a < base + size end`
-        : lua`inRange = function() return true end`;
-      const collect = lua`
-        local inRange
-        ${moduleFilter}
-        local results = AOBScan(${tokens.join(' ')}, ${protection})
-        if results then
-          for i = 0, results.Count - 1 do
-            local a = tonumber(results[i], 16)
-            if a and inRange(a) then items[#items + 1] = string.format('0x%X  %s', a, getNameFromAddress(a)) end
-          end
-          results.destroy()
-        end`;
-      const text = await ctx.run(listBody(collect, 'AOB matches', { filter: '', offset, limit }), { timeoutMs: 300_000 });
-      return text ?? 'No AOB matches';
+    async run({ address, type, duration_ms, interval_ms, wait }, ctx) {
+      const samples = Math.floor(duration_ms / interval_ms) + 1;
+      const isFloat = type === 'float' || type === 'double';
+      const { read } = isFloat ? FLOAT_TYPES[type as 'float' | 'double'] : INT_TYPES[type as IntType];
+      const kind = `sample ${address}`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          ${resolveAddress(address)}
+          local fmt = ${isFloat ? '%.9g' : '%d'}
+          local w = { changes = {}, unreadable = 0 }
+          return {
+            kind = ${kind}, window = true,
+            run = function(job)
+              job.total = ${samples}
+              local start = getTickCount()
+              for i = 1, ${samples} do
+                if job.cancelled then return end
+                local v = ${raw(read)}
+                if v == nil then
+                  w.unreadable = w.unreadable + 1
+                else
+                  if w.first == nil then w.first, w.min, w.max = v, v, v end
+                  if w.last ~= nil and v ~= w.last then w.changes[#w.changes + 1] = { getTickCount() - start, w.last, v } end
+                  w.min, w.max, w.last = math.min(w.min, v), math.max(w.max, v), v
+                end
+                job.done = i
+                job.message = string.format('%s: %d changes', ${kind}, #w.changes)
+                if i < ${samples} then sleep(${interval_ms}) end
+              end
+              w.elapsed = getTickCount() - start
+            end,
+            finish = function(job)
+              local head = string.format('0x%X (%s) sampled for %.1f s: %d reads, %d changes%s', addr, ${type}, (w.elapsed or 0) / 1000,
+                ${samples}, #w.changes, w.unreadable > 0 and string.format(', %d unreadable', w.unreadable) or '')
+              if w.first == nil then return head .. '\nError: the address was never readable' end
+              local out = { head, string.format('first ' .. fmt .. ', last ' .. fmt .. ', min ' .. fmt .. ', max ' .. fmt, w.first, w.last, w.min, w.max) }
+              -- Every change: a long report is cut like any output, the rest readable with ce_output_more
+              for _, c in ipairs(w.changes) do
+                out[#out + 1] = string.format('  +%.2f s: ' .. fmt .. ' -> ' .. fmt, c[1] / 1000, c[2], c[3])
+              end
+              return table.concat(out, '\n')
+            end,
+          }
+        end)()`,
+        wait,
+      );
     },
   }),
 

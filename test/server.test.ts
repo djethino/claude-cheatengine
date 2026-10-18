@@ -6,14 +6,20 @@ import { useHarness } from './harness.js';
 import { Session, BLOCKED_DANGEROUS } from '../src/ce/session.js';
 import { createServer, BLOCKED_READ_ONLY } from '../src/server.js';
 import { allTools } from '../src/tools/index.js';
+import { pluginScriptHash } from '../src/install.js';
 
 // Replies split in two writes: the client must reassemble them
 const h = useHarness({ splitReplies: true });
 
-test('ce_status reports the connection and SAFE mode', async () => {
+test('ce_status reports the connection, SAFE mode and whether CE runs the current plugin script', async () => {
+  h.ce.exec(`CEMCP = { scriptHash = ${pluginScriptHash()} }`);
   const { text, isError } = await h.call('ce_status');
   assert.match(text, /^Connected: Lua 5\.4 - CE 7\.7 \(PID: 0\) \[safe\]\nCE plugin:/);
   assert.equal(isError, false);
+  h.ce.exec('CEMCP.scriptHash = 12345');
+  assert.match((await h.call('ce_status')).text, /\nCheat Engine runs an older copy of the plugin script: restart Cheat Engine/);
+  h.ce.exec('CEMCP = nil');
+  assert.match((await h.call('ce_status')).text, /\nCE plugin not loaded in this Cheat Engine session/);
 });
 
 test('Cheat Engine older than 7.7 is refused with a clear message', async () => {
@@ -46,6 +52,18 @@ test('ce_lua after /unsafe-ce: every return value, run once, syntax errors repor
 test('ce_lua without a process attached adds the nudge', async () => {
   await h.call('ce_safety_enable_writes', { confirm: 'USER_CONFIRMED' });
   assert.equal((await h.call('ce_lua', { code: 'return 5' })).text, '5\n[NUDGE: No process attached - be careful with memory operations]');
+});
+
+test('the unlock needs the user to click Yes in Cheat Engine, and names the anti-cheat', async () => {
+  h.ce.exec('__fake.dialogAnswer = mrNo');
+  const declined = await h.call('ce_safety_enable_writes', { confirm: 'USER_CONFIRMED' });
+  assert.equal(declined.text, 'BLOCKED: the user declined the unlock in Cheat Engine');
+  assert.equal(declined.isError, true);
+  assert.notEqual(h.ce.eval('_mcp_unsafe'), true);
+  h.ce.exec('__fake.dialogAnswer = mrYes; __fake.pid = 5555; _mcp.ac = { [5555] = "BattlEye" }');
+  assert.match((await h.call('ce_safety_enable_writes', { confirm: 'USER_CONFIRMED' })).text, /^UNSAFE mode enabled \(confirmed by the user in Cheat Engine\)/);
+  assert.match(String(h.ce.eval('__fake.dialogs[2]')), /ANTI-CHEAT DETECTED in game\.exe: BattlEye\.\nUsing Cheat Engine on this game can get your account banned/);
+  assert.equal(h.ce.eval('_mcp_unsafe'), true);
 });
 
 test('enable writes needs the confirmation token', async () => {

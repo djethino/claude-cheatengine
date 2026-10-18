@@ -104,6 +104,55 @@ function scanJob(kind: string, name: string, first: boolean, summary: LuaCode): 
   }`;
 }
 
+type MemoryPref = 'yes' | 'no' | 'any';
+
+interface FirstScan {
+  name: string;
+  kind: string;
+  /** Lua that sets the locals `start` and `stop` (MAX_ADDRESS is defined), or reports and returns. */
+  range: LuaCode;
+  varType: string;
+  option: string;
+  value: string;
+  value2: string;
+  hexadecimal: boolean;
+  memory: { writable: MemoryPref; executable: MemoryPref; copy_on_write: MemoryPref };
+  alignment: number;
+  /** string.format pattern of the result's first line, with %d for the result count. */
+  summary: string;
+}
+
+/** Job spec expression that starts a first scan on a new memscan named `name`. */
+function firstScan(spec: FirstScan): LuaCode {
+  const pref = { yes: 'scanInclude', no: 'scanExclude', any: 'scanDontCare' } as const;
+  const aligned = spec.alignment > 1;
+  return lua`(function()
+    if _mcp.scans[${spec.name}] and not _mcp.scans[${spec.name}].ready then
+      _mcp_str = 'Error: scan ' .. ${spec.name} .. ' is still running (see ce_job_list)' return
+    end
+    local MAX_ADDRESS = targetIs64Bit() and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF
+    ${spec.range}
+    _mcp.dropScan(${spec.name})
+    local ms = createMemScan()
+    ms.VarType = ${spec.varType}
+    ms.ScanOption = ${spec.option}
+    ms.Scanvalue1 = ${spec.value}
+    ms.Scanvalue2 = ${spec.value2}
+    ms.Hexadecimal = ${spec.hexadecimal}
+    ms.Startaddress = start
+    ms.Stopaddress = stop
+    ms.ScanWritable = ${pref[spec.memory.writable]}
+    ms.ScanExecutable = ${pref[spec.memory.executable]}
+    ms.ScanCopyOnWrite = ${pref[spec.memory.copy_on_write]}
+    ms.Fastscanmethod = ${aligned ? 'fsmAligned' : 'fsmNotAligned'}
+    ms.Fastscanparameter = ${String(aligned ? spec.alignment : 1)}
+    local s = { ms = ms, ready = false }
+    _mcp.scans[${spec.name}] = s
+    ms.firstScan()
+    return ${scanJob(spec.kind, spec.name, true, lua`${spec.summary}`)}
+  end)()`;
+}
+
 export const scanTools = [
   defineTool({
     name: 'ce_scan_value',
@@ -140,41 +189,81 @@ ERROR HANDLING:
       const { value, value_type, scan_type, value2, hexadecimal, start_address, stop_address, scan_name, wait } = args;
       if (!NO_VALUE.has(scan_type) && !value.trim()) return `Error: scan_type '${scan_type}' needs a value`;
       if (scan_type === 'between' && !value2.trim()) return "Error: scan_type 'between' needs value2";
-      const pref = { yes: 'scanInclude', no: 'scanExclude', any: 'scanDontCare' } as const;
-      const aligned = args.alignment > 1;
+      const range = lua`
+        local function addressOf(text, default)
+          if text == '' then return default end
+          local a = getAddressSafe(text)
+          if not a then error('invalid address: ' .. text, 0) end
+          return a
+        end
+        local start, stop = addressOf(${start_address}, 0), addressOf(${stop_address}, MAX_ADDRESS)`;
       const kind = `${scan_type} ${value_type} scan`;
       return runJob(
         ctx,
         kind,
-        lua`(function()
-          if _mcp.scans[${scan_name}] and not _mcp.scans[${scan_name}].ready then
-            _mcp_str = 'Error: scan ' .. ${scan_name} .. ' is still running (see ce_job_list)' return
-          end
-          _mcp.dropScan(${scan_name})
-          local function addressOf(text, default)
-            if text == '' then return default end
-            local a = getAddressSafe(text)
-            if not a then error('invalid address: ' .. text, 0) end
-            return a
-          end
-          local ms = createMemScan()
-          ms.VarType = ${VAR_TYPES[value_type]}
-          ms.ScanOption = ${FIRST_SCAN_TYPES[scan_type]}
-          ms.Scanvalue1 = ${value}
-          ms.Scanvalue2 = ${value2}
-          ms.Hexadecimal = ${hexadecimal}
-          ms.Startaddress = addressOf(${start_address}, 0)
-          ms.Stopaddress = addressOf(${stop_address}, targetIs64Bit() and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF)
-          ms.ScanWritable = ${pref[args.writable]}
-          ms.ScanExecutable = ${pref[args.executable]}
-          ms.ScanCopyOnWrite = ${pref[args.copy_on_write]}
-          ms.Fastscanmethod = ${aligned ? 'fsmAligned' : 'fsmNotAligned'}
-          ms.Fastscanparameter = ${String(aligned ? args.alignment : 1)}
-          local s = { ms = ms, ready = false }
-          _mcp.scans[${scan_name}] = s
-          ms.firstScan()
-          return ${scanJob(kind, scan_name, true, lua`${`Scan "${scan_name}" complete (${scan_type}, ${value_type}): %d results`}`)}
-        end)()`,
+        firstScan({
+          name: scan_name,
+          kind,
+          range,
+          varType: VAR_TYPES[value_type],
+          option: FIRST_SCAN_TYPES[scan_type],
+          value,
+          value2,
+          hexadecimal,
+          memory: args,
+          alignment: args.alignment,
+          summary: `Scan "${scan_name}" complete (${scan_type}, ${value_type}): %d results`,
+        }),
+        wait,
+      );
+    },
+  }),
+
+  defineTool({
+    name: 'ce_aob_scan',
+    description: `Scan memory for an array of bytes pattern, in the background (CE shows its progress). Up to 10 matches are listed directly; the matches stay a named scan: page through them with ce_scan_results(scan_name="aob").
+
+The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
+    schema: {
+      pattern: z.string().describe("Byte pattern with wildcards, e.g. '89 45 ?? 8B 4D'"),
+      module: z.string().default('').describe('Only scan this module (e.g. "game.exe"); default: all memory'),
+      writable: z.enum(['yes', 'no', 'any']).default('any').describe('Writable memory'),
+      executable: z.enum(['yes', 'no', 'any']).default('any').describe('Executable memory ("yes" with writable "no" = code only)'),
+      copy_on_write: z.enum(['yes', 'no', 'any']).default('any').describe('Copy-on-write memory'),
+      scan_name: scanName.default('aob'),
+      ...waitSchema,
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ pattern, module, scan_name, wait, ...memory }, ctx) {
+      const tokens = pattern.trim().split(/\s+/);
+      if (!tokens.every((t) => /^([0-9a-f]{2}|\?\??)$/i.test(t))) {
+        return `Error: invalid pattern "${pattern}": expected hex bytes and ?? wildcards separated by spaces`;
+      }
+      const range = module
+        ? lua`
+          local start = getAddressSafe(${module})
+          local size = start and getModuleSize(${module})
+          if not start or not size then _mcp_str = 'Error: module not found: ' .. ${module} return end
+          local stop = start + size`
+        : lua`local start, stop = 0, MAX_ADDRESS`;
+      const kind = 'AOB scan';
+      return runJob(
+        ctx,
+        kind,
+        firstScan({
+          name: scan_name,
+          kind,
+          range,
+          varType: 'vtByteArray',
+          option: 'soExactValue',
+          value: tokens.map((t) => (t.startsWith('?') ? '??' : t.toUpperCase())).join(' '),
+          value2: '',
+          hexadecimal: true,
+          memory,
+          alignment: 1,
+          summary: `AOB scan "${scan_name}"${module ? ` in ${module}` : ''} complete: %d matches`,
+        }),
         wait,
       );
     },
@@ -251,6 +340,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_reset',
+    antiCheatExempt: true,
     description: 'Discard a scan and its results (frees the memory and files CE keeps for it).',
     schema: { scan_name: scanName },
     writes: false,
@@ -265,6 +355,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_list',
+    antiCheatExempt: true,
     description: 'List the scans kept by the server, with their result counts.',
     schema: {},
     writes: false,

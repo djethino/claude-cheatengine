@@ -9,10 +9,12 @@ import { defineTool } from './registry.js';
 import { readOnly } from '../options.js';
 import { CEPipeError } from '../ce/pipe.js';
 import { installState } from './install.js';
+import { pluginScriptHash } from '../install.js';
 
 export const coreTools = [
   defineTool({
     name: 'ce_status',
+    antiCheatExempt: true,
     description:
       'Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed.',
     schema: {
@@ -26,10 +28,17 @@ export const coreTools = [
       let connection: string;
       try {
         if (take_over) await ctx.scope.takeOver();
-        connection =
+        const reply =
           (await ctx.run(lua`
-            _mcp_str = string.format('Connected: %s - CE %s (PID: %d) [%s]', _VERSION, tostring(getCEVersion()),
-              getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`)) ?? 'Error: no answer from Cheat Engine';
+            _mcp_str = string.format('%s\nConnected: %s - CE %s (PID: %d) [%s]', CEMCP and tostring(CEMCP.scriptHash) or 'none',
+              _VERSION, tostring(getCEVersion()), getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`)) ?? '';
+        const [loadedHash, ...rest] = reply.split('\n');
+        connection = rest.join('\n') || 'Error: no answer from Cheat Engine';
+        if (loadedHash === 'none') {
+          connection += '\nCE plugin not loaded in this Cheat Engine session (the pipe was opened another way): MCP menu and logs unavailable';
+        } else if (loadedHash !== String(pluginScriptHash())) {
+          connection += '\nCheat Engine runs an older copy of the plugin script: restart Cheat Engine to load the updated one';
+        }
       } catch (err) {
         // Still report the install state: it tells why CE may not answer
         if (!(err instanceof CEPipeError)) throw err;
@@ -43,6 +52,7 @@ export const coreTools = [
 
   defineTool({
     name: 'ce_get_logs',
+    antiCheatExempt: true,
     description: "Get the CE plugin's log of recent MCP commands (useful for debugging).",
     schema: {
       clear: z.boolean().default(false).describe('Clear the log buffer after reading'),
@@ -62,6 +72,7 @@ export const coreTools = [
 
   defineTool({
     name: 'ce_output_more',
+    antiCheatExempt: true,
     description: `Read the rest of the previous tool's output when it ended with a "[truncated: ...]" line.
 
 Must be called right after the truncated call: calling any other tool discards it.
@@ -82,6 +93,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
 
   defineTool({
     name: 'ce_safety_status',
+    antiCheatExempt: true,
     description: 'Check the current safety mode: SAFE (tools that can crash the game or CE are locked) or UNSAFE.',
     schema: {},
     writes: false,
@@ -94,6 +106,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
 
   defineTool({
     name: 'ce_safety_enable_writes',
+    antiCheatExempt: true,
     description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access).
 
 IMPORTANT: Do NOT call this tool unless the user explicitly requests it
@@ -105,13 +118,31 @@ Never enable unsafe mode proactively or without clear user consent.`,
     writes: false,
     async run({ confirm }, ctx) {
       if (confirm !== 'USER_CONFIRMED') return 'BLOCKED: Use the /unsafe-ce command to enable unsafe mode.';
-      await ctx.run(lua`_mcp_unsafe = true if updateMenuState then pcall(updateMenuState) end`);
-      return 'UNSAFE mode enabled: crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.';
+      // The token only proves the skill ran: the unlock itself needs a click in Cheat Engine,
+      // which Claude cannot do. The dialog is modal on CE's main thread, hence the long timeout.
+      const text = await ctx.run(
+        lua`
+          if _mcp_unsafe == true then _mcp_str = 'UNSAFE mode is already on' return end
+          local ac = (_mcp.ac or {})[getOpenedProcessID() or 0]
+          local warning = (ac and ac ~= '') and ('\n\nANTI-CHEAT DETECTED in ' .. tostring(process) .. ': ' .. ac ..
+            '.\nUsing Cheat Engine on this game can get your account banned.') or ''
+          local answer = messageDialog('CE MCP - unlock request',
+            'Claude Code asks to unlock the tools that can crash the game or Cheat Engine: Lua, code injection, ' ..
+            'breakpoints, DLL injection (speedhack, D3D, Mono), .CT tables, Mono static and instance access.' .. warning ..
+            '\n\nAllow it until Claude Code or Cheat Engine restarts?', mtWarning, mbYes, mbNo)
+          if answer ~= mrYes then _mcp_str = 'BLOCKED: the user declined the unlock in Cheat Engine' return end
+          _mcp_unsafe = true
+          if updateMenuState then pcall(updateMenuState) end
+          _mcp_str = 'UNSAFE mode enabled (confirmed by the user in Cheat Engine): crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.'`,
+        { timeoutMs: 180_000 },
+      );
+      return text ?? 'Error: no answer from Cheat Engine';
     },
   }),
 
   defineTool({
     name: 'ce_safety_disable_writes',
+    antiCheatExempt: true,
     description: 'Re-enable SAFE mode: locks the tools that can crash the game or CE again.',
     schema: {},
     writes: false,

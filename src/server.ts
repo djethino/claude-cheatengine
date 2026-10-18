@@ -34,7 +34,8 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
       const ctx: ToolContext = {
         scope,
         signal: extra.signal,
-        run: (body, options) => scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false }),
+        run: (body, options) =>
+          scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
         async progress(done, total, message) {
           if (progressToken === undefined) return;
           await extra.sendNotification({

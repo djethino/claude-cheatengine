@@ -22,6 +22,7 @@ export function installState(): Promise<string> {
 export const installTools = [
   defineTool({
     name: 'ce_install_plugin',
+    antiCheatExempt: true,
     description: `Install the CE-side plugin: a loader in Cheat Engine's autorun folder that runs the auto-updated plugin script. May show a Windows administrator prompt.
 
 IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., by running /ce-install). It writes into the Cheat Engine install folder.`,
