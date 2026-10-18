@@ -54,7 +54,9 @@ function getNameFromAddress(a)
   if a >= 0x400000 and a < 0x401000 then return string.format('game.exe+%X', a - 0x400000) end
   return string.format('%X', a)
 end
+-- Mapped memory: the module (0x400000-0x401000), then heap up to 0x402000
 local function mapped(a) return a >= 0x400000 and a < 0x402000 end
+function inModule(a) return a >= 0x400000 and a < 0x401000 end
 function readBytes(a, n, asTable)
   local t = {}
   for i = 0, n - 1 do
