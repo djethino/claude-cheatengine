@@ -9,8 +9,6 @@ import { listBody, pageSchema } from './list.js';
 import { ANTI_CHEAT_ADVICE } from '../anticheat.js';
 import { runJob, waitSchema } from './jobs.js';
 
-/** ce_sample_value: changes listed in its report. */
-const MAX_CHANGES_LISTED = 50;
 
 /** Lua that resolves an address expression into the local `addr`, or reports it and returns. */
 export function resolveAddress(expression: string, local = 'addr'): LuaCode {
@@ -353,11 +351,10 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
                 ${samples}, #w.changes, w.unreadable > 0 and string.format(', %d unreadable', w.unreadable) or '')
               if w.first == nil then return head .. '\nError: the address was never readable' end
               local out = { head, string.format('first ' .. fmt .. ', last ' .. fmt .. ', min ' .. fmt .. ', max ' .. fmt, w.first, w.last, w.min, w.max) }
-              for i = 1, math.min(#w.changes, ${MAX_CHANGES_LISTED}) do
-                local c = w.changes[i]
+              -- Every change: a long report is cut like any output, the rest readable with ce_output_more
+              for _, c in ipairs(w.changes) do
                 out[#out + 1] = string.format('  +%.2f s: ' .. fmt .. ' -> ' .. fmt, c[1] / 1000, c[2], c[3])
               end
-              if #w.changes > ${MAX_CHANGES_LISTED} then out[#out + 1] = string.format('  ... %d more changes', #w.changes - ${MAX_CHANGES_LISTED}) end
               return table.concat(out, '\n')
             end,
           }

@@ -28,12 +28,14 @@ export const pointerTools = [
     name: 'ce_pointer_scan',
     description: `Find static pointer chains to an address: module addresses from which the address can be reached through pointers, e.g. "[game.exe+1A2B0] + 0x48 = target" (1 level) or "[[game.exe+5F00] + 0x10] + 0x48 = target" (2 levels). Static addresses stay valid across game restarts, unlike the target; the offsets go as is to ce_watch_add.
 
-Each level runs memory scans in the background with a progress window: level 1 is one scan, each deeper level one scan per group of candidates (max_candidates), so deep searches take longer.`,
+A chain can also hold by chance: check it once the game has moved its objects (restart, new level, the game's own "change pointer"), and keep the ones that still lead to the value.
+
+Each level runs memory scans in the background with a progress window: level 1 is one scan, each deeper level one scan per group of nearby candidates (max_candidates), so deep searches take longer.`,
     schema: {
       address: z.string().describe('Target address (a value found by a scan)'),
       max_offset: z.number().int().min(0).max(0x100000).default(0x1000).describe('Largest offset from a pointer to what it points into (default 0x1000)'),
       max_level: z.number().int().min(1).max(5).default(2).describe('Longest chain searched (pointer levels)'),
-      max_candidates: z.number().int().min(1).max(100).default(10).describe('Heap pointers followed to the next level, closest offsets first'),
+      max_candidates: z.number().int().min(1).max(100).default(50).describe('Heap pointers followed to the next level, closest offsets first (too few can miss the real chain)'),
       max_results: z.number().int().min(1).max(1000).default(50).describe('Maximum number of chains listed'),
     },
     writes: false,

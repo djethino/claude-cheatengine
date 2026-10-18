@@ -23086,7 +23086,6 @@ var jobTools = [
 ];
 
 // src/tools/memory.ts
-var MAX_CHANGES_LISTED = 50;
 function resolveAddress(expression, local = "addr") {
   return lua`
     local ${raw(local)} = getAddressSafe(${expression})
@@ -23398,11 +23397,10 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
                 ${samples}, #w.changes, w.unreadable > 0 and string.format(', %d unreadable', w.unreadable) or '')
               if w.first == nil then return head .. '\nError: the address was never readable' end
               local out = { head, string.format('first ' .. fmt .. ', last ' .. fmt .. ', min ' .. fmt .. ', max ' .. fmt, w.first, w.last, w.min, w.max) }
-              for i = 1, math.min(#w.changes, ${MAX_CHANGES_LISTED}) do
-                local c = w.changes[i]
+              -- Every change: a long report is cut like any output, the rest readable with ce_output_more
+              for _, c in ipairs(w.changes) do
                 out[#out + 1] = string.format('  +%.2f s: ' .. fmt .. ' -> ' .. fmt, c[1] / 1000, c[2], c[3])
               end
-              if #w.changes > ${MAX_CHANGES_LISTED} then out[#out + 1] = string.format('  ... %d more changes', #w.changes - ${MAX_CHANGES_LISTED}) end
               return table.concat(out, '\n')
             end,
           }
@@ -25325,12 +25323,14 @@ var pointerTools = [
     name: "ce_pointer_scan",
     description: `Find static pointer chains to an address: module addresses from which the address can be reached through pointers, e.g. "[game.exe+1A2B0] + 0x48 = target" (1 level) or "[[game.exe+5F00] + 0x10] + 0x48 = target" (2 levels). Static addresses stay valid across game restarts, unlike the target; the offsets go as is to ce_watch_add.
 
-Each level runs memory scans in the background with a progress window: level 1 is one scan, each deeper level one scan per group of candidates (max_candidates), so deep searches take longer.`,
+A chain can also hold by chance: check it once the game has moved its objects (restart, new level, the game's own "change pointer"), and keep the ones that still lead to the value.
+
+Each level runs memory scans in the background with a progress window: level 1 is one scan, each deeper level one scan per group of nearby candidates (max_candidates), so deep searches take longer.`,
     schema: {
       address: external_exports.string().describe("Target address (a value found by a scan)"),
       max_offset: external_exports.number().int().min(0).max(1048576).default(4096).describe("Largest offset from a pointer to what it points into (default 0x1000)"),
       max_level: external_exports.number().int().min(1).max(5).default(2).describe("Longest chain searched (pointer levels)"),
-      max_candidates: external_exports.number().int().min(1).max(100).default(10).describe("Heap pointers followed to the next level, closest offsets first"),
+      max_candidates: external_exports.number().int().min(1).max(100).default(50).describe("Heap pointers followed to the next level, closest offsets first (too few can miss the real chain)"),
       max_results: external_exports.number().int().min(1).max(1e3).default(50).describe("Maximum number of chains listed")
     },
     writes: false,
