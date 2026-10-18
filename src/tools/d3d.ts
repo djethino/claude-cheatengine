@@ -122,20 +122,30 @@ Only ASCII characters 32-126 are drawn (CE's font maps).`,
     antiCheatExempt: true,
     description: `Look at the game: a screenshot of the attached process's window, returned as an image (any graphics API; the window must not be minimized).
 
-By default nothing is written to disk. Give save_path to also keep the PNG file.`,
+By default only the client area (the game's picture, without title bar and borders) is captured and nothing is written to disk. A region zooms on a part of it at full resolution (read small text, a HUD value). Give save_path to also keep the PNG file.`,
     schema: {
-      max_width: z.number().int().min(320).max(3840).default(1280).describe('Scale the image down to this width (smaller costs less context)'),
+      max_width: z.number().int().min(64).max(3840).default(1280).describe('Scale the image down to this width (smaller costs less context)'),
+      client_only: z.boolean().default(true).describe('Only the client area; false = the whole window with its frame'),
+      region: z
+        .object({
+          x: z.number().int().min(0),
+          y: z.number().int().min(0),
+          width: z.number().int().min(1),
+          height: z.number().int().min(1),
+        })
+        .optional()
+        .describe('Part to keep, in pixels from the top-left of the client area (or of the window); clipped to it'),
       save_path: z.string().default('').describe('Also write the PNG to this file (absolute, or relative to the server working directory)'),
     },
     writes: ({ save_path }) => save_path !== '',
     requiresProcess: true,
-    async run({ max_width, save_path }, ctx) {
+    async run({ max_width, client_only, region, save_path }, ctx) {
       const pidText = await ctx.run(lua`_mcp_str = tostring(getOpenedProcessID())`);
       const pid = Number(pidText);
       if (!Number.isInteger(pid) || pid <= 0) return pidText ?? 'Error: no process attached';
       let capture;
       try {
-        capture = await captureWindow(pid, max_width);
+        capture = await captureWindow(pid, { maxWidth: max_width, clientOnly: client_only, region });
       } catch (err) {
         return `Error: ${(err as Error).message}`;
       }
@@ -145,12 +155,14 @@ By default nothing is written to disk. Give save_path to also keep the PNG file.
         writeFileSync(path, capture.png);
         saved = `, saved to ${path}`;
       }
+      const area = client_only ? 'client area' : 'window';
+      const what = region ? `region (${region.x}, ${region.y}) of the ${area}: ` : `${area} `;
       const size =
-        capture.image.width === capture.window.width
-          ? `${capture.window.width}x${capture.window.height}`
-          : `${capture.window.width}x${capture.window.height} window, scaled to ${capture.image.width}x${capture.image.height}`;
+        capture.image.width === capture.area.width
+          ? `${capture.area.width}x${capture.area.height}`
+          : `${capture.area.width}x${capture.area.height}, scaled to ${capture.image.width}x${capture.image.height}`;
       return {
-        text: `Screenshot of PID ${pid} (${size}${saved})`,
+        text: `Screenshot of PID ${pid} (${what}${size}${saved})`,
         image: { data: capture.png.toString('base64'), mimeType: 'image/png' },
       };
     },
