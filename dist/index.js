@@ -13374,7 +13374,7 @@ var CEPipe = class {
       const timer = setTimeout(() => {
         this.fail(
           new CEPipeError(
-            `Cheat Engine did not answer within ${timeoutMs / 1e3} s (a dialog may be open in CE, or the operation is still running there)`
+            `Cheat Engine did not answer within ${timeoutMs / 1e3} s (the operation may still be running there; ce_dialogs shows any dialog open in CE)`
           )
         );
       }, timeoutMs);
@@ -13384,6 +13384,10 @@ var CEPipe = class {
   }
   close() {
     this.fail(new CEPipeError("Pipe closed"));
+  }
+  /** Give up the request in flight with this error (its late reply is discarded with the socket). */
+  abort(err) {
+    if (this.pending) this.fail(err);
   }
   open() {
     return new Promise((resolve3, reject) => {
@@ -13613,6 +13617,257 @@ function detectAntiCheat(moduleNames, exePath) {
 }
 var ANTI_CHEAT_ADVICE = "Using Cheat Engine on it can get the player's account banned (online play, leaderboards, cloud saves). Tell the user this reason before doing anything else. Only if they accept the risk can they run /unsafe-ce; never unlock it yourself.";
 
+// src/win/helper.ts
+import { spawn } from "child_process";
+import { join as join2 } from "path";
+function powershellPath() {
+  return join2(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+var REQUEST_TIMEOUT_MS = 3e4;
+var HELPER_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class CemcpUi {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc proc, IntPtr lParam);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int max);
+  [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd, int index);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+  public static string Text(IntPtr h) { var b = new StringBuilder(4096); GetWindowText(h, b, b.Capacity); return b.ToString(); }
+  public static string Class(IntPtr h) { var b = new StringBuilder(256); GetClassName(h, b, b.Capacity); return b.ToString(); }
+  public static uint Pid(IntPtr h) { uint p; GetWindowThreadProcessId(h, out p); return p; }
+  // Push buttons: class Button (Win32 and LCL TButton) or TBitBtn, without the checkbox/radio styles
+  public static bool IsPushButton(IntPtr h) {
+    string c = Class(h);
+    if (c.IndexOf("BitBtn", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+    if (!c.Equals("Button", StringComparison.OrdinalIgnoreCase)) return false;
+    int kind = GetWindowLong(h, -16) & 0xF;
+    return kind == 0 || kind == 1 || kind == 0xB;
+  }
+  public static List<IntPtr> TopWindows(uint pid) {
+    var list = new List<IntPtr>();
+    EnumWindows((h, l) => { if (Pid(h) == pid && IsWindowVisible(h)) list.Add(h); return true; }, IntPtr.Zero);
+    return list;
+  }
+  public static List<IntPtr> Children(IntPtr parent) {
+    var list = new List<IntPtr>();
+    EnumChildWindows(parent, (h, l) => { if (IsWindowVisible(h)) list.Add(h); return true; }, IntPtr.Zero);
+    return list;
+  }
+}
+'@
+[void][CemcpUi]::SetProcessDPIAware()
+
+# The dialogs blocking CE: a modal dialog disables the window that owns it (CE's main form), so a
+# dialog is a visible, enabled window of the process whose owner, of the same process, is disabled.
+# Non-modal windows (Lua engine, progress windows) are owned by the application window, which stays
+# enabled. CE's dialogs are LCL forms: their labels are not windows, the text is only in the image
+function Get-Dialogs($pid_, $withImage) {
+  $out = @()
+  foreach ($h in [CemcpUi]::TopWindows([uint32]$pid_)) {
+    if (-not [CemcpUi]::IsWindowEnabled($h)) { continue }
+    $owner = [CemcpUi]::GetWindow($h, 4)
+    if ($owner -eq [IntPtr]::Zero -or [CemcpUi]::Pid($owner) -ne [uint32]$pid_ -or [CemcpUi]::IsWindowEnabled($owner)) { continue }
+    $texts = @(); $buttons = @(); $buttonHandles = @()
+    foreach ($c in [CemcpUi]::Children($h)) {
+      $t = [CemcpUi]::Text($c)
+      if ([CemcpUi]::IsPushButton($c)) { $buttons += @{ id = [string][long]$c; text = $t }; $buttonHandles += $c }
+      elseif ($t.Trim() -ne '') { $texts += $t }
+    }
+    $d = @{ id = [string][long]$h; pid = [int]$pid_; title = [CemcpUi]::Text($h); texts = $texts; buttons = $buttons }
+    if ($withImage) {
+      $r = New-Object CemcpUi+RECT
+      [void][CemcpUi]::GetWindowRect($h, [ref]$r)
+      $w = $r.Right - $r.Left; $hh = $r.Bottom - $r.Top
+      if ($w -gt 0 -and $hh -gt 0) {
+        $bmp = New-Object System.Drawing.Bitmap $w, $hh
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $hdc = $g.GetHdc()
+        [void][CemcpUi]::PrintWindow($h, $hdc, 2)
+        $g.ReleaseHdc($hdc)
+        # The dialog's print sometimes leaves a button out (seen live with CE's LCL dialogs): print
+        # every button by itself over it, so the choices are always in the image
+        foreach ($c in $buttonHandles) {
+          $cr = New-Object CemcpUi+RECT
+          [void][CemcpUi]::GetWindowRect($c, [ref]$cr)
+          $cw = $cr.Right - $cr.Left; $ch = $cr.Bottom - $cr.Top
+          if ($cw -le 0 -or $ch -le 0) { continue }
+          $cb = New-Object System.Drawing.Bitmap $cw, $ch
+          $cg = [System.Drawing.Graphics]::FromImage($cb)
+          $cdc = $cg.GetHdc()
+          $printed = [CemcpUi]::PrintWindow($c, $cdc, 2)
+          $cg.ReleaseHdc($cdc); $cg.Dispose()
+          if ($printed) { $g.DrawImage($cb, $cr.Left - $r.Left, $cr.Top - $r.Top) }
+          $cb.Dispose()
+        }
+        $g.Dispose()
+        $ms = New-Object System.IO.MemoryStream
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        $d.image = [Convert]::ToBase64String($ms.ToArray())
+      }
+    }
+    $out += $d
+  }
+  return $out
+}
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  try {
+    $req = $line | ConvertFrom-Json
+    switch ($req.cmd) {
+      'dialogs' { $result = @(foreach ($p in $req.pids) { Get-Dialogs $p $req.image }) }
+      'close' {
+        $h = [IntPtr][long]$req.id
+        if (-not [CemcpUi]::IsWindow($h)) { throw 'the dialog no longer exists' }
+        # WM_CLOSE, posted (the dialog's own message loop handles it, nothing waits on CE): what
+        # its close button does. LCL buttons ignore a BM_CLICK sent from another process
+        [void][CemcpUi]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
+        $result = $true
+      }
+      'ceProcesses' { $result = @(Get-Process | Where-Object { $_.ProcessName -like 'cheatengine*' } | ForEach-Object { $_.Id }) }
+      default { throw ('unknown command ' + $req.cmd) }
+    }
+    $reply = @{ ok = $true; result = $result }
+  } catch {
+    $reply = @{ ok = $false; error = $_.Exception.Message }
+  }
+  [Console]::Out.WriteLine((ConvertTo-Json -InputObject $reply -Depth 6 -Compress))
+  [Console]::Out.Flush()
+}
+`;
+var WinHelper = class {
+  child = null;
+  stdout = "";
+  waiting = [];
+  async request(command) {
+    if (process.platform !== "win32") throw new Error("only supported on Windows");
+    const child = this.child ?? this.start();
+    return new Promise((resolve3, reject) => {
+      const timer = setTimeout(() => {
+        this.stop(new Error("the Windows helper did not answer"));
+      }, REQUEST_TIMEOUT_MS);
+      this.waiting.push({ resolve: resolve3, reject, timer });
+      child.stdin.write(`${JSON.stringify(command)}
+`);
+    });
+  }
+  stop(err = new Error("Windows helper stopped")) {
+    const child = this.child;
+    this.child = null;
+    this.stdout = "";
+    child?.removeAllListeners();
+    child?.kill();
+    for (const w of this.waiting.splice(0)) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+  }
+  start() {
+    const encoded = Buffer.from(HELPER_SCRIPT, "utf16le").toString("base64");
+    const child = spawn(powershellPath(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+      windowsHide: true
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => this.onData(chunk));
+    child.stderr.resume();
+    child.on("exit", () => this.stop(new Error("the Windows helper exited")));
+    child.on("error", (err) => this.stop(new Error(`the Windows helper failed to start: ${err.message}`)));
+    child.unref();
+    child.stdin.unref?.();
+    child.stdout.unref?.();
+    child.stderr.unref?.();
+    this.child = child;
+    return child;
+  }
+  onData(chunk) {
+    this.stdout += chunk;
+    let newline;
+    while ((newline = this.stdout.indexOf("\n")) >= 0) {
+      const line = this.stdout.slice(0, newline).trim();
+      this.stdout = this.stdout.slice(newline + 1);
+      if (!line) continue;
+      const w = this.waiting.shift();
+      if (!w) continue;
+      clearTimeout(w.timer);
+      try {
+        const reply = JSON.parse(line);
+        if (reply.ok) w.resolve(reply.result);
+        else w.reject(new Error(reply.error ?? "unknown error"));
+      } catch {
+        w.reject(new Error(`unexpected answer from the Windows helper: ${line.slice(0, 80)}`));
+      }
+    }
+  }
+};
+var winHelper = new WinHelper();
+async function ceProcesses() {
+  if (process.platform !== "win32") return [];
+  return winHelper.request({ cmd: "ceProcesses" });
+}
+
+// src/ce/dialogs.ts
+function isInformation(dialog) {
+  return dialog.buttons.length === 1;
+}
+async function listDialogs(cePid, withImage = false) {
+  const pids = cePid ? [cePid] : await ceProcesses();
+  if (!pids.length) return [];
+  return winHelper.request({ cmd: "dialogs", pids, image: withImage });
+}
+function describeDialogs(dialogs) {
+  return dialogs.map((d) => {
+    const texts = d.texts.length ? `: ${d.texts.join(" | ")}` : "";
+    const buttons = d.buttons.map((b) => b.text.replace("&", "") || "?").join(", ");
+    const what = isInformation(d) ? `information (1 button). Read it with ce_dialogs (its text is in the image), then close it with ce_dialog_close(id="${d.id}")` : `a QUESTION for the user (buttons: ${buttons}). Tell the user to answer it in Cheat Engine; never answer it yourself`;
+    return `Cheat Engine shows the dialog "${d.title}"${texts} - ${what}`;
+  }).join("\n");
+}
+async function closeInformationDialog(cePid, id) {
+  const dialogs = await listDialogs(cePid);
+  const dialog = dialogs.find((d) => d.id === id);
+  if (!dialog) {
+    return dialogs.length ? `Error: no dialog ${id} open in Cheat Engine. Open now:
+${describeDialogs(dialogs)}` : `Error: no dialog ${id} open in Cheat Engine (it was closed)`;
+  }
+  if (!isInformation(dialog)) {
+    return `BLOCKED: "${dialog.title}" asks the user a question (${dialog.buttons.length} buttons): only the user answers it, in Cheat Engine`;
+  }
+  await winHelper.request({ cmd: "close", id });
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve3) => setTimeout(resolve3, 100));
+    if (!(await listDialogs(cePid)).some((d) => d.id === id)) return `Closed the dialog "${dialog.title}"`;
+  }
+  return `Error: the dialog "${dialog.title}" did not close`;
+}
+
+// src/logger.ts
+function format(args) {
+  return args.map((arg) => arg instanceof Error ? arg.stack ?? arg.message : typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ");
+}
+var logger = {
+  info: (...args) => process.stderr.write(`[cheatengine] ${format(args)}
+`),
+  error: (...args) => process.stderr.write(`[cheatengine] ERROR ${format(args)}
+`)
+};
+
 // src/ce/session.ts
 var PIPE_PATH = "\\\\.\\pipe\\ce-mcp";
 var DEFAULT_MAX_BYTES = 1e4;
@@ -13639,6 +13894,9 @@ var Mutex = class {
 };
 var OwnershipError = class extends Error {
 };
+var CEDialogError = class extends CEPipeError {
+};
+var DIALOG_WATCH_MS = 1500;
 var Session = class {
   constructor(pipePath = PIPE_PATH, version2) {
     this.version = version2;
@@ -13652,6 +13910,9 @@ var Session = class {
   firstConnection = true;
   /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
   moreTotal = 0;
+  /** PID of the CE serving the pipe, read at every connection: whose dialogs are looked for. */
+  pid = null;
+  dialogWatchFailed = false;
   /** Run fn with exclusive access to CE. */
   async exclusive(call, fn) {
     let release = await this.mutex.acquire();
@@ -13677,6 +13938,65 @@ var Session = class {
   close() {
     this.pipe.close();
   }
+  /** PID of the CE serving the pipe as of the last connection (null before any). No lock: usable while a call is blocked. */
+  get cePid() {
+    return this.pid;
+  }
+  /**
+   * One pipe request, watched for dialogs. A dialog the user opens in CE's window does not block
+   * the pipe (its modal loop still runs pipe scripts); one opened while the script runs does: the
+   * script waits for it (an auto assembler error, a Mono failure, a confirmation). So while the
+   * request runs longer than DIALOG_WATCH_MS, CE's dialogs are listed (of every running CE when the
+   * one serving the pipe is not known yet); a new one (any, or an information one when the call
+   * asks the user a question) ends the wait with its description instead of a timeout.
+   */
+  async exec(script2, timeoutMs, asksUser = false) {
+    const pid = this.pid;
+    if (timeoutMs <= DIALOG_WATCH_MS) return this.pipe.exec(script2, timeoutMs);
+    let done = false;
+    const failed = (err) => {
+      if (!this.dialogWatchFailed) logger.error("cannot look for Cheat Engine dialogs:", err);
+      this.dialogWatchFailed = true;
+    };
+    const earlier = listDialogs(pid).then(
+      (dialogs) => new Set(dialogs.map((d) => d.id)),
+      (err) => {
+        failed(err);
+        return null;
+      }
+    );
+    const watch = async () => {
+      const before = await earlier;
+      if (!before) return;
+      for (; ; ) {
+        await new Promise((resolve3) => setTimeout(resolve3, DIALOG_WATCH_MS));
+        if (done) return;
+        let dialogs;
+        try {
+          dialogs = (await listDialogs(pid)).filter((d) => !before.has(d.id));
+        } catch (err) {
+          failed(err);
+          return;
+        }
+        if (done) return;
+        if (dialogs.length && (!asksUser || dialogs.some(isInformation))) {
+          this.pipe.abort(
+            new CEDialogError(
+              `Cheat Engine is blocked by a dialog: this call was given up (its result is lost; check the state once the dialog is closed).
+${describeDialogs(dialogs)}`
+            )
+          );
+          return;
+        }
+      }
+    };
+    void watch();
+    try {
+      return await this.pipe.exec(script2, timeoutMs);
+    } finally {
+      done = true;
+    }
+  }
   /**
    * Give CE up when the server stops, so the next session (or a restarted one) is not refused
    * until the owner claim lapses. Best effort: CE may already be gone.
@@ -13699,13 +14019,14 @@ var Session = class {
       _mcp_server = { owner = ${this.owner}, version = ${this.version}, resetSafe = ${this.firstConnection}, lapse = ${OWNER_LAPSE_S} }
       ${raw(prelude_default)}
       return math.floor(getCEVersion() * 100 + 0.5)`;
-    const ceVersion = Number(await this.pipe.exec(init.code, DEFAULT_TIMEOUT_MS));
+    const ceVersion = Number(await this.exec(init.code, DEFAULT_TIMEOUT_MS));
     if (ceVersion < MIN_CE_VERSION) {
       this.pipe.close();
       throw new CEPipeError(
         `Cheat Engine ${MIN_CE_VERSION / 100} or later is required (this is CE ${ceVersion / 100}): update it from https://www.cheatengine.org`
       );
     }
+    this.pid = Number(await this.exec("return getCheatEngineProcessID()", DEFAULT_TIMEOUT_MS)) || null;
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
     this.moreTotal = 0;
@@ -13715,9 +14036,9 @@ var Session = class {
     await this.pipe.exec(lua`_mcp_owner = ${this.owner}; _mcp_owner_seen = os.time(); return 1`.code, DEFAULT_TIMEOUT_MS);
   }
   /** Raw integer result of a protocol-internal script (no gate, no text). */
-  async runInt(code, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  async runInt(code, timeoutMs = DEFAULT_TIMEOUT_MS, asksUser = false) {
     await this.ensureReady();
-    return this.pipe.exec(code.code, timeoutMs);
+    return this.exec(code.code, timeoutMs, asksUser);
   }
   chunk(call, body, options) {
     const log = call ? lua`if CEMCP_logCommand then pcall(CEMCP_logCommand, ${call.tool}, ${call.args.slice(0, 100)}) end` : raw("");
@@ -13768,7 +14089,7 @@ var Session = class {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
     const runOnce = async () => {
-      const length = await this.runInt(code, timeoutMs);
+      const length = await this.runInt(code, timeoutMs, options.asksUser ?? false);
       const connection = this.pipe.connectionId;
       const text2 = length ? await this.readString("_mcp_str", Number(length), maxBytes, 0) : null;
       if (this.pipe.connectionId !== connection) throw new CEPipeError("Connection to Cheat Engine lost while reading the result");
@@ -22046,17 +22367,6 @@ function isErrorText(text) {
   return /^(Error:|BLOCKED:|LUA_ERROR:|LUA_SYNTAX_ERROR:)/.test(text);
 }
 
-// src/logger.ts
-function format(args) {
-  return args.map((arg) => arg instanceof Error ? arg.stack ?? arg.message : typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ");
-}
-var logger = {
-  info: (...args) => process.stderr.write(`[cheatengine] ${format(args)}
-`),
-  error: (...args) => process.stderr.write(`[cheatengine] ERROR ${format(args)}
-`)
-};
-
 // src/server.ts
 var BLOCKED_READ_ONLY = "BLOCKED: read-only mode is on (plugin option read_only): this tool changes the game or writes a file. The user can turn it off with /plugin configure asymptomatik-cheatengine.";
 function summarize(args) {
@@ -22067,19 +22377,28 @@ async function callTool(session2, tool, args, extra) {
   const dangerous = resolveFlag(tool.dangerous, args);
   const call = { tool: tool.name, args: summarize(args) };
   const progressToken = extra._meta?.progressToken;
+  const progress = async (done, total, message) => {
+    if (progressToken === void 0) return;
+    await extra.sendNotification({
+      method: "notifications/progress",
+      params: { progressToken, progress: done, ...total !== void 0 && { total }, message }
+    });
+  };
+  if (tool.outsideCE) {
+    const unavailable = () => {
+      throw new Error(`${tool.name} works outside CE: it cannot run CE code`);
+    };
+    const scope = new Proxy({}, { get: unavailable });
+    return tool.run(args, { scope, signal: extra.signal, run: unavailable, progress, cePid: () => session2.cePid });
+  }
   try {
     return await session2.exclusive(call, (scope) => {
       const ctx = {
         scope,
         signal: extra.signal,
         run: (body, options) => scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
-        async progress(done, total, message) {
-          if (progressToken === void 0) return;
-          await extra.sendNotification({
-            method: "notifications/progress",
-            params: { progressToken, progress: done, ...total !== void 0 && { total }, message }
-          });
-        }
+        progress,
+        cePid: () => session2.cePid
       };
       return tool.run(args, ctx);
     });
@@ -22116,12 +22435,12 @@ function createServer(session2, tools, version2) {
 
 // src/tools/install.ts
 import { existsSync as existsSync3 } from "fs";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 
 // src/install.ts
 import { execFile } from "child_process";
 import { existsSync as existsSync2, lstatSync, mkdirSync, readFileSync as readFileSync2, readdirSync as readdirSync2, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { basename as basename2, join as join2 } from "path";
+import { basename as basename2, join as join3 } from "path";
 import { promisify } from "util";
 
 // ce-plugin/ce-mcp-server.lua
@@ -22232,11 +22551,32 @@ local function startServer()
     return true
   end
 
+  -- CE has no way to close a Lua server: once opened, a stop only marks it stopped
+  if CEMCP.serverOpened then
+    CEMCP.running = true
+    log("Server resumed on pipe: \\\\\\\\.\\\\pipe\\\\" .. CONFIG.pipeName)
+    updateMenuState()
+    return true
+  end
+
+  -- Two Cheat Engines serving the same pipe would each get some of Claude Code's calls (an unlock
+  -- in one, the lock in the other): stay off while another one serves it
+  local probe = connectToPipe(CONFIG.pipeName, 500)
+  if probe then
+    probe.destroy()
+    CEMCP.otherInstance = true
+    updateMenuState()
+    notify("MCP server not started: another Cheat Engine already serves Claude Code. Close it (then use Start Server in the MCP menu), or work in that one.")
+    return false
+  end
+  CEMCP.otherInstance = false
+
   local success, err = pcall(function()
     openLuaServer(CONFIG.pipeName)
   end)
 
   if success then
+    CEMCP.serverOpened = true
     CEMCP.running = true
     CEMCP.commandCount = 0
     log("Server started on pipe: \\\\\\\\.\\\\pipe\\\\" .. CONFIG.pipeName)
@@ -22331,7 +22671,7 @@ function createStatusLabel()
     CEMCP.statusLabel.Font.Style = "fsBold"
     CEMCP.statusLabel.BevelOuter = "bvNone"
     CEMCP.statusLabel.Align = "alRight"
-    CEMCP.statusLabel.Width = 100
+    CEMCP.statusLabel.Width = 160
     CEMCP.statusLabel.Alignment = "taCenter"
     log("Status indicator added to status bar")
   else
@@ -22364,7 +22704,11 @@ end
 function updateStatusLabel()
   if not CEMCP.statusLabel then return end
 
-  if CEMCP.isUnsafe then
+  if not CEMCP.running then
+    CEMCP.statusLabel.Caption = CEMCP.otherInstance and " MCP: OFF (other CE) " or " MCP: OFF "
+    CEMCP.statusLabel.Font.Color = 0x555555  -- Gray
+    CEMCP.statusLabel.Color = 0xDDDDDD
+  elseif CEMCP.isUnsafe then
     CEMCP.statusLabel.Caption = " MCP: UNSAFE "
     CEMCP.statusLabel.Font.Color = 0x0000FF  -- Red (BGR format)
     CEMCP.statusLabel.Color = 0xCCCCFF      -- Light red background
@@ -22565,8 +22909,8 @@ initialize()
 
 // src/install.ts
 var run = promisify(execFile);
-var USER_DIR = join2(process.env.LOCALAPPDATA ?? join2(process.env.USERPROFILE ?? "", "AppData", "Local"), "cheatengine-mcp");
-var USER_SCRIPT = join2(USER_DIR, "ce-mcp-server.lua");
+var USER_DIR = join3(process.env.LOCALAPPDATA ?? join3(process.env.USERPROFILE ?? "", "AppData", "Local"), "cheatengine-mcp");
+var USER_SCRIPT = join3(USER_DIR, "ce-mcp-server.lua");
 var LOADER_NAME = "ce-mcp-loader.lua";
 var LEGACY_NAME = "ce-mcp-server.lua";
 var LEGACY_MARKER = "Cheat Engine MCP Server Plugin";
@@ -22582,11 +22926,8 @@ else
 end
 `;
 var ELEVATION_TIMEOUT_MS = 12e4;
-function powershellPath() {
-  return join2(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-}
 function regPath() {
-  return join2(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "reg.exe");
+  return join3(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "reg.exe");
 }
 async function regValues(key, view) {
   try {
@@ -22614,7 +22955,7 @@ async function findCeDirs() {
   const add = (path) => {
     if (!path) return;
     const clean = path.replace(/[\\/]+$/, "");
-    if (existsSync2(join2(clean, "autorun")) && !found.some((p) => p.toLowerCase() === clean.toLowerCase())) found.push(clean);
+    if (existsSync2(join3(clean, "autorun")) && !found.some((p) => p.toLowerCase() === clean.toLowerCase())) found.push(clean);
   };
   for (const hive of ["HKLM", "HKCU"]) {
     for (const view of ["/reg:64", "/reg:32"]) {
@@ -22628,7 +22969,7 @@ async function findCeDirs() {
   for (const env of ["ProgramFiles", "ProgramFiles(x86)"]) {
     const base = process.env[env];
     if (!base || !existsSync2(base)) continue;
-    for (const name of readdirSync2(base)) if (name.startsWith("Cheat Engine")) add(join2(base, name));
+    for (const name of readdirSync2(base)) if (name.startsWith("Cheat Engine")) add(join3(base, name));
   }
   return found;
 }
@@ -22646,7 +22987,7 @@ function syncUserScript() {
   return true;
 }
 function legacyInstall(autorun) {
-  const legacy = join2(autorun, LEGACY_NAME);
+  const legacy = join3(autorun, LEGACY_NAME);
   if (!existsSync2(legacy) && !isLink(legacy)) return null;
   if (isLink(legacy)) return basename2(readlinkSync(legacy)) === LEGACY_NAME ? legacy : null;
   return statSync(legacy).isFile() && readFileSync2(legacy, "utf8").slice(0, 512).includes(LEGACY_MARKER) ? legacy : null;
@@ -22659,8 +23000,8 @@ function isLink(path) {
   }
 }
 function loaderStatus(ceDir) {
-  const autorun = join2(ceDir, "autorun");
-  const loader = join2(autorun, LOADER_NAME);
+  const autorun = join3(ceDir, "autorun");
+  const loader = join3(autorun, LOADER_NAME);
   const legacy = legacyInstall(autorun);
   let state;
   if (existsSync2(loader)) {
@@ -22674,9 +23015,9 @@ function loaderStatus(ceDir) {
   return `${ceDir}: ${state}`;
 }
 function writeLoader(ceDir) {
-  const autorun = join2(ceDir, "autorun");
-  writeFileSync(join2(autorun, LOADER_NAME), LOADER, "utf8");
-  const done = [`wrote ${join2(autorun, LOADER_NAME)}`];
+  const autorun = join3(ceDir, "autorun");
+  writeFileSync(join3(autorun, LOADER_NAME), LOADER, "utf8");
+  const done = [`wrote ${join3(autorun, LOADER_NAME)}`];
   const legacy = legacyInstall(autorun);
   if (legacy) {
     unlinkSync(legacy);
@@ -22720,7 +23061,7 @@ async function install(ceDirs, serverScript) {
       }
       try {
         await writeLoaderElevated(ceDir, serverScript);
-        lines.push(`installed with administrator rights in ${join2(ceDir, "autorun")}`);
+        lines.push(`installed with administrator rights in ${join3(ceDir, "autorun")}`);
       } catch (elevated) {
         lines.push(`FAILED for ${ceDir}: ${elevated.message}`);
         continue;
@@ -22764,7 +23105,7 @@ IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., b
       if (confirm !== "USER_CONFIRMED") return "BLOCKED: Use the /ce-install command to install the CE plugin.";
       let dirs;
       if (ce_dir) {
-        if (!existsSync3(join3(ce_dir, "autorun"))) return `Error: ${ce_dir} has no autorun folder, is it a Cheat Engine install folder?`;
+        if (!existsSync3(join4(ce_dir, "autorun"))) return `Error: ${ce_dir} has no autorun folder, is it a Cheat Engine install folder?`;
         dirs = [ce_dir];
       } else {
         dirs = await findCeDirs();
@@ -22776,6 +23117,11 @@ IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., b
 ];
 
 // src/tools/core.ts
+async function instancesWarning() {
+  const pids = await ceProcesses();
+  if (pids.length < 2) return "";
+  return `Warning: ${pids.length} Cheat Engines are running (PIDs ${pids.join(", ")}): only one serves Claude Code (its MCP status label is not OFF). Make sure the user works in that one, or ask them to close the others.`;
+}
 var coreTools = [
   defineTool({
     name: "ce_status",
@@ -22803,7 +23149,7 @@ var coreTools = [
         if (!(err instanceof CEPipeError)) throw err;
         connection = `Not connected: ${err.message}`;
       }
-      return [connection, readOnly() ? "Read-only mode: on (plugin option read_only)" : "", await installState()].filter(Boolean).join("\n");
+      return [connection, readOnly() ? "Read-only mode: on (plugin option read_only)" : "", await instancesWarning(), await installState()].filter(Boolean).join("\n");
     }
   }),
   defineTool({
@@ -22881,7 +23227,7 @@ Never enable unsafe mode proactively or without clear user consent.`,
           _mcp_unsafe = true
           if updateMenuState then pcall(updateMenuState) end
           _mcp_str = 'UNSAFE mode enabled (confirmed by the user in Cheat Engine): crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.'`,
-        { timeoutMs: 18e4 }
+        { timeoutMs: 18e4, asksUser: true }
       );
       return text ?? "Error: no answer from Cheat Engine";
     }
@@ -22909,7 +23255,7 @@ or assign a string to _mcp_str. Errors are reported as LUA_ERROR / LUA_SYNTAX_ER
 
 ERROR HANDLING:
 - If this hangs or fails repeatedly, STOP and ask the user to check CE
-- CE may have a popup dialog blocking execution
+- A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs)
 - Don't retry more than 2-3 times - report failure to user`,
     schema: {
       code: external_exports.string().describe("Lua code to execute in Cheat Engine")
@@ -23606,8 +23952,7 @@ The scan runs in the background (CE shows its progress); up to 10 results are li
 Then: change the value in the game and refine with ce_scan_next.
 
 ERROR HANDLING:
-- If scan hangs or returns no results after 2-3 attempts, STOP and ask user
-- CE may have a popup blocking (check CE window)`,
+- If scan hangs or returns no results after 2-3 attempts, STOP and ask user`,
     schema: {
       value: external_exports.string().default("").describe("Value to search for, e.g. '100' or '3.14' (not needed for scan_type 'unknown')"),
       value_type: external_exports.enum(Object.keys(VAR_TYPES)).default("int32").describe("Value type; 'all' = int32, float and double at once"),
@@ -24299,6 +24644,9 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
         _mcp.nextWatch = (_mcp.nextWatch or 0) + 1
         local w = { id = _mcp.nextWatch, address = addr, kind = ${bp_type}, hits = {}, order = {}, total = 0 }
         local execute = ${bp_type === "execute"}
+        -- Start the debugger explicitly: debugProcess never asks the user (a confirmation dialog
+        -- would block every call until answered)
+        if not debug_isDebugging() then debugProcess() end
         local ok, bpid = debug_setBreakpoint(addr, ${size}, ${raw(trigger)}, function()
           local ctxt = debug_getCurrentContextTable()
           if not ctxt then return 0 end
@@ -25028,11 +25376,7 @@ import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 
 // src/capture.ts
 import { execFile as execFile2 } from "child_process";
-import { join as join4 } from "path";
 var CAPTURE_TIMEOUT_MS = 3e4;
-function powershellPath2() {
-  return join4(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-}
 function regionScript({ x, y, width, height }, areaName) {
   return `if (${x} -ge $width -or ${y} -ge $height) { throw "the region starts outside the ${areaName} ($($width)x$($height))" }
 $x0 += ${x}; $y0 += ${y}
@@ -25138,7 +25482,7 @@ function captureWindow(pid, options) {
   const encoded = Buffer.from(script(pid, options), "utf16le").toString("base64");
   return new Promise((resolve3, reject) => {
     execFile2(
-      powershellPath2(),
+      powershellPath(),
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
       { timeout: CAPTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
@@ -25474,8 +25818,154 @@ Stopped early: ${stopped}` : report;
   })
 ];
 
+// src/tools/lifecycle.ts
+import { spawn as spawn2 } from "child_process";
+import { existsSync as existsSync5 } from "fs";
+import { join as join5 } from "path";
+var LAUNCH_TIMEOUT_MS = 6e4;
+var EXIT_TIMEOUT_MS = 3e4;
+async function answering(ctx) {
+  try {
+    return Number(await ctx.scope.runInt(lua`return getCheatEngineProcessID()`, 3e3));
+  } catch (err) {
+    if (err instanceof CEPipeError) return err.message;
+    throw err;
+  }
+}
+async function launch(ctx) {
+  const dirs = (await findCeDirs()).filter((dir2) => existsSync5(join5(dir2, "Cheat Engine.exe")));
+  if (!dirs.length) return "Error: Cheat Engine not found (registry, Program Files): install it from https://www.cheatengine.org";
+  const dir = dirs.find((d) => loaderStatus(d) === "loader installed") ?? dirs[0];
+  const child = spawn2(join5(dir, "Cheat Engine.exe"), [], { cwd: dir, detached: true, stdio: "ignore" });
+  const started = await new Promise((resolve3) => {
+    child.once("spawn", () => resolve3(null));
+    child.once("error", (err) => resolve3(err.message));
+  });
+  if (started) return `Error: cannot start ${join5(dir, "Cheat Engine.exe")}: ${started}`;
+  child.unref();
+  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
+  let reason = "";
+  while (Date.now() < deadline) {
+    await ctx.scope.pause(1e3);
+    const pid = await answering(ctx);
+    if (typeof pid === "number") return `Cheat Engine started from ${dir} (PID ${pid}); its MCP plugin answers (SAFE mode, nothing attached)`;
+    reason = pid;
+    await ctx.progress(Date.now() - (deadline - LAUNCH_TIMEOUT_MS), LAUNCH_TIMEOUT_MS, "waiting for Cheat Engine to start");
+  }
+  return `Error: Cheat Engine was started from ${dir} but its MCP plugin did not answer within ${LAUNCH_TIMEOUT_MS / 1e3} s (${reason}). A dialog may be open in it, or the plugin is not loaded (ce_status).`;
+}
+var lifecycleTools = [
+  defineTool({
+    name: "ce_dialogs",
+    antiCheatExempt: true,
+    outsideCE: true,
+    description: `Show the dialogs open in Cheat Engine (they block every other call until answered), with an image of the first one: its text is only readable there.
+
+A dialog with one button only informs: close it with ce_dialog_close once read. One with a choice (Yes/No...) is the user's decision: tell them, never answer it.`,
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const dialogs = await listDialogs(ctx.cePid(), true);
+      if (!dialogs.length) return "No dialog is open in Cheat Engine";
+      const text = `${dialogs.length} dialog(s) open in Cheat Engine (image: the first one)
+${dialogs.map((d) => `id ${d.id}: ${describeDialogs([d])}`).join("\n")}`;
+      const image = dialogs[0].image;
+      return image ? { text, image: { data: image, mimeType: "image/png" } } : text;
+    }
+  }),
+  defineTool({
+    name: "ce_dialog_close",
+    antiCheatExempt: true,
+    outsideCE: true,
+    description: "Close an information dialog of Cheat Engine (one button: an error, a notice) after reading it with ce_dialogs. Refuses dialogs that ask a question: only the user answers those.",
+    schema: {
+      id: external_exports.string().regex(/^\d+$/).describe("Dialog id, as given by ce_dialogs")
+    },
+    writes: false,
+    async run({ id }, ctx) {
+      return closeInformationDialog(ctx.cePid(), id);
+    }
+  }),
+  defineTool({
+    name: "ce_launch",
+    antiCheatExempt: true,
+    description: "Start Cheat Engine (when it is not running) and wait until its MCP plugin answers.",
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const pid = await answering(ctx);
+      if (typeof pid === "number") return `Cheat Engine is already running and answering (PID ${pid})`;
+      const running = await ceProcesses();
+      if (running.length) {
+        return `Error: Cheat Engine is running (PID ${running.join(", ")}) but does not answer (${pid}). A dialog may be open in it (ce_dialogs), its MCP status label may say OFF (another Cheat Engine serves Claude Code, or the server was stopped in the MCP menu), or the plugin is not loaded (ce_status).`;
+      }
+      return launch(ctx);
+    }
+  }),
+  defineTool({
+    name: "ce_restart",
+    antiCheatExempt: true,
+    description: `Restart Cheat Engine, e.g. when ce_status says it runs an older copy of the plugin script.
+
+When the address list has entries or a job runs, the user confirms in a dialog in Cheat Engine (what would be lost is listed). Enabled scripts are disabled first, which restores the game's code; frozen values are released. CE comes back in SAFE mode with nothing attached.`,
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const reply = await ctx.run(
+        lua`
+          local al = getAddressList()
+          local entries, frozen, scripts = al.Count, 0, 0
+          for i = 0, al.Count - 1 do
+            local mr = al.getMemoryRecord(i)
+            if mr.Active then if mr.Script then scripts = scripts + 1 else frozen = frozen + 1 end end
+          end
+          local jobs = 0
+          for _, job in pairs(_mcp.jobs) do if job.status == 'running' or job.status == 'finishing' then jobs = jobs + 1 end end
+          if entries > 0 or jobs > 0 then
+            local lost = {}
+            if entries > 0 then lost[#lost + 1] = string.format('- the address list (%d entries) unless you saved it', entries) end
+            if scripts > 0 then lost[#lost + 1] = string.format('- %d enabled script(s): disabled first, restoring the game\'s code', scripts) end
+            if frozen > 0 then lost[#lost + 1] = string.format('- %d frozen value(s): released', frozen) end
+            if jobs > 0 then lost[#lost + 1] = string.format('- %d running job(s): cancelled', jobs) end
+            local answer = messageDialog('CE MCP - restart request',
+              'Claude Code asks to restart Cheat Engine. This ends:\n' .. table.concat(lost, '\n') .. '\n\nRestart now?', mtWarning, mbYes, mbNo)
+            if answer ~= mrYes then _mcp_str = 'BLOCKED: the user declined the restart in Cheat Engine' return end
+          end
+          for _, job in pairs(_mcp.jobs) do _mcp.cancelJob(job.id) end
+          -- Scripts last enabled first: disable in reverse order
+          for i = al.Count - 1, 0, -1 do
+            local mr = al.getMemoryRecord(i)
+            if mr.Active then
+              mr.Active = false
+              if mr.Active then _mcp_str = 'Error: could not disable "' .. mr.Description .. '" (see the CE window): restart cancelled' return end
+            end
+          end
+          -- Close once this answer is on its way
+          local t = createTimer()
+          t.Interval = 300
+          t.OnTimer = function(timer) timer.Enabled = false closeCE() end
+          _mcp_str = 'closing'`,
+        { timeoutMs: 18e4, asksUser: true }
+      );
+      if (reply !== "closing") return reply ?? "Error: no answer from Cheat Engine";
+      const closing = ctx.cePid();
+      if (!closing) return "Error: Cheat Engine is closing but its process is unknown: start it again with ce_launch once it is closed";
+      const deadline = Date.now() + EXIT_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        await ctx.scope.pause(500);
+        if (!(await ceProcesses()).includes(closing)) return launch(ctx);
+        const dialogs = await listDialogs(closing);
+        if (dialogs.length) return `Cheat Engine did not close yet:
+${describeDialogs(dialogs)}
+Once it is closed, start it again with ce_launch.`;
+      }
+      return `Error: Cheat Engine did not exit within ${EXIT_TIMEOUT_MS / 1e3} s. Check its window, then use ce_launch once it is closed.`;
+    }
+  })
+];
+
 // src/tools/index.ts
-var allTools = [...coreTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...d3dTools, ...pointerTools, ...jobTools, ...installTools];
+var allTools = [...coreTools, ...lifecycleTools, ...memoryTools, ...scanTools, ...tableTools, ...codeTools, ...monoTools, ...d3dTools, ...pointerTools, ...jobTools, ...installTools];
 var names = /* @__PURE__ */ new Set();
 for (const tool of allTools) {
   if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
@@ -25499,17 +25989,18 @@ try {
   setSyncError(err.message);
   logger.error("CE plugin script sync failed:", err);
 }
-var session = new Session(PIPE_PATH, "0.2.0");
-var server = createServer(session, allTools, "0.2.0");
+var session = new Session(PIPE_PATH, "0.3.0");
+var server = createServer(session, allTools, "0.3.0");
 var stopping = false;
 async function stop() {
   if (stopping) return;
   stopping = true;
   await Promise.race([session.release(), new Promise((resolve3) => setTimeout(resolve3, 3e3))]);
+  winHelper.stop();
   process.exit(0);
 }
 process.stdin.on("end", () => void stop());
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
 await server.connect(new StdioServerTransport());
-logger.info(`asymptomatik-cheatengine ${"0.2.0"} ready (${allTools.length} tools)`);
+logger.info(`asymptomatik-cheatengine ${"0.3.0"} ready (${allTools.length} tools)`);

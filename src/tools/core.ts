@@ -10,6 +10,14 @@ import { readOnly } from '../options.js';
 import { CEPipeError } from '../ce/pipe.js';
 import { installState } from './install.js';
 import { pluginScriptHash } from '../install.js';
+import { ceProcesses } from '../win/helper.js';
+
+/** Several running Cheat Engines: only one serves Claude Code (the others stay off). */
+async function instancesWarning(): Promise<string> {
+  const pids = await ceProcesses();
+  if (pids.length < 2) return '';
+  return `Warning: ${pids.length} Cheat Engines are running (PIDs ${pids.join(', ')}): only one serves Claude Code (its MCP status label is not OFF). Make sure the user works in that one, or ask them to close the others.`;
+}
 
 export const coreTools = [
   defineTool({
@@ -44,7 +52,7 @@ export const coreTools = [
         if (!(err instanceof CEPipeError)) throw err;
         connection = `Not connected: ${err.message}`;
       }
-      return [connection, readOnly() ? 'Read-only mode: on (plugin option read_only)' : '', await installState()]
+      return [connection, readOnly() ? 'Read-only mode: on (plugin option read_only)' : '', await instancesWarning(), await installState()]
         .filter(Boolean)
         .join('\n');
     },
@@ -134,7 +142,7 @@ Never enable unsafe mode proactively or without clear user consent.`,
           _mcp_unsafe = true
           if updateMenuState then pcall(updateMenuState) end
           _mcp_str = 'UNSAFE mode enabled (confirmed by the user in Cheat Engine): crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.'`,
-        { timeoutMs: 180_000 },
+        { timeoutMs: 180_000, asksUser: true },
       );
       return text ?? 'Error: no answer from Cheat Engine';
     },
@@ -164,7 +172,7 @@ or assign a string to _mcp_str. Errors are reported as LUA_ERROR / LUA_SYNTAX_ER
 
 ERROR HANDLING:
 - If this hangs or fails repeatedly, STOP and ask the user to check CE
-- CE may have a popup dialog blocking execution
+- A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs)
 - Don't retry more than 2-3 times - report failure to user`,
     schema: {
       code: z.string().describe('Lua code to execute in Cheat Engine'),

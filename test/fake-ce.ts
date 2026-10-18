@@ -16,6 +16,9 @@ import monoStub from './fake/mono.lua';
 const CE_STUBS = `
 __fake = { pid = 0, logs = {}, prints = {} }
 function getCEVersion() return __fake.ceVersion or 7.7 end
+-- CE's own process, only when a test sets it
+function getCheatEngineProcessID() return __fake.cePid end
+function closeCE() __fake.closed = true end
 function getOpenedProcessID() return __fake.pid end
 function openProcess(p) __fake.pid = type(p) == 'number' and p or 4242 return true end
 function print(...) local t = table.pack(...) for i = 1, t.n do t[i] = tostring(t[i]) end __fake.prints[#__fake.prints + 1] = table.concat(t, ' ') end

@@ -166,8 +166,7 @@ The scan runs in the background (CE shows its progress); up to 10 results are li
 Then: change the value in the game and refine with ce_scan_next.
 
 ERROR HANDLING:
-- If scan hangs or returns no results after 2-3 attempts, STOP and ask user
-- CE may have a popup blocking (check CE window)`,
+- If scan hangs or returns no results after 2-3 attempts, STOP and ask user`,
     schema: {
       value: z.string().default('').describe("Value to search for, e.g. '100' or '3.14' (not needed for scan_type 'unknown')"),
       value_type: z.enum(Object.keys(VAR_TYPES) as [keyof typeof VAR_TYPES]).default('int32').describe("Value type; 'all' = int32, float and double at once"),

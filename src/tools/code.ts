@@ -56,6 +56,9 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
         _mcp.nextWatch = (_mcp.nextWatch or 0) + 1
         local w = { id = _mcp.nextWatch, address = addr, kind = ${bp_type}, hits = {}, order = {}, total = 0 }
         local execute = ${bp_type === 'execute'}
+        -- Start the debugger explicitly: debugProcess never asks the user (a confirmation dialog
+        -- would block every call until answered)
+        if not debug_isDebugging() then debugProcess() end
         local ok, bpid = debug_setBreakpoint(addr, ${size}, ${raw(trigger)}, function()
           local ctxt = debug_getCurrentContextTable()
           if not ctxt then return 0 end

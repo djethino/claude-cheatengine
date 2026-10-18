@@ -54,7 +54,7 @@ export class CEPipe {
       const timer = setTimeout(() => {
         this.fail(
           new CEPipeError(
-            `Cheat Engine did not answer within ${timeoutMs / 1000} s (a dialog may be open in CE, or the operation is still running there)`,
+            `Cheat Engine did not answer within ${timeoutMs / 1000} s (the operation may still be running there; ce_dialogs shows any dialog open in CE)`,
           ),
         );
       }, timeoutMs);
@@ -65,6 +65,11 @@ export class CEPipe {
 
   close(): void {
     this.fail(new CEPipeError('Pipe closed'));
+  }
+
+  /** Give up the request in flight with this error (its late reply is discarded with the socket). */
+  abort(err: Error): void {
+    if (this.pending) this.fail(err);
   }
 
   private open(): Promise<Socket> {

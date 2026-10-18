@@ -25,6 +25,8 @@ export interface ToolContext {
   /** Report progress to the client (shown by Claude Code for long calls). */
   progress(done: number, total: number | undefined, message: string): Promise<void>;
   signal: AbortSignal;
+  /** PID of the CE serving the pipe as of the last connection (null before any). */
+  cePid(): number | null;
 }
 
 /** A tool result with an image (e.g. a screenshot) besides its text. */
@@ -46,6 +48,12 @@ export interface ToolDef<S extends Shape = Shape> {
    * Every other tool is refused there until UNSAFE mode is on (src/anticheat.ts).
    */
   antiCheatExempt?: boolean;
+  /**
+   * Does not talk to CE through the pipe (it looks at CE's windows from outside): runs without
+   * waiting for the call in progress, so it works while a dialog blocks CE. ctx.run and ctx.scope
+   * are unavailable.
+   */
+  outsideCE?: boolean;
   run(args: Args<S>, ctx: ToolContext): Promise<string | ImageResult>;
 }
 
