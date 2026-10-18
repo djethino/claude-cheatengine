@@ -24,7 +24,7 @@ export const coreTools = [
     name: 'ce_status',
     antiCheatExempt: true,
     description:
-      'Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed.',
+      'Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed. Warns when CE runs an older copy of the plugin script (restart CE) and when several Cheat Engines run.',
     schema: {
       take_over: z
         .boolean()
@@ -115,11 +115,9 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
   defineTool({
     name: 'ce_safety_enable_writes',
     antiCheatExempt: true,
-    description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access).
+    description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access) and lifts the anti-cheat guard. It only takes effect once the user clicks Yes in a confirmation dialog in Cheat Engine (the call waits for it).
 
-IMPORTANT: Do NOT call this tool unless the user explicitly requests it
-(e.g., by running /unsafe-ce or explicitly asking to unlock these tools).
-Never enable unsafe mode proactively or without clear user consent.`,
+IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., by running /unsafe-ce or explicitly asking to unlock these tools). Never enable unsafe mode proactively or without clear user consent.`,
     schema: {
       confirm: z.string().default('').describe('Must be "USER_CONFIRMED" to enable. This is set by the /unsafe-ce command.'),
     },
@@ -169,11 +167,7 @@ Prefer: ce_scan_value, ce_read_memory, ce_write_memory, ce_mono_*, etc.
 
 The code runs as a function body: \`return\` its result (numbers, strings, several values are tab-separated),
 or assign a string to _mcp_str. Errors are reported as LUA_ERROR / LUA_SYNTAX_ERROR.
-
-ERROR HANDLING:
-- If this hangs or fails repeatedly, STOP and ask the user to check CE
-- A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs)
-- Don't retry more than 2-3 times - report failure to user`,
+A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs). After 2-3 failures, report to the user instead of retrying.`,
     schema: {
       code: z.string().describe('Lua code to execute in Cheat Engine'),
     },

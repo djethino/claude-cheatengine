@@ -16,7 +16,7 @@ export const waitSchema = {
   wait: z
     .boolean()
     .default(true)
-    .describe('Wait for the result (default). false returns a job id at once: read it later with ce_job_status'),
+    .describe('Wait for the result. false returns a job id at once: read it later with ce_job_status'),
 };
 
 interface JobLine {

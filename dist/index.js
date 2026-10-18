@@ -23126,7 +23126,7 @@ var coreTools = [
   defineTool({
     name: "ce_status",
     antiCheatExempt: true,
-    description: "Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed.",
+    description: "Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed. Warns when CE runs an older copy of the plugin script (restart CE) and when several Cheat Engines run.",
     schema: {
       take_over: external_exports.boolean().default(false).describe("Take Cheat Engine over from another Claude Code session that is using it (only when ce_status or another tool reported it)")
     },
@@ -23202,11 +23202,9 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
   defineTool({
     name: "ce_safety_enable_writes",
     antiCheatExempt: true,
-    description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access).
+    description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access) and lifts the anti-cheat guard. It only takes effect once the user clicks Yes in a confirmation dialog in Cheat Engine (the call waits for it).
 
-IMPORTANT: Do NOT call this tool unless the user explicitly requests it
-(e.g., by running /unsafe-ce or explicitly asking to unlock these tools).
-Never enable unsafe mode proactively or without clear user consent.`,
+IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., by running /unsafe-ce or explicitly asking to unlock these tools). Never enable unsafe mode proactively or without clear user consent.`,
     schema: {
       confirm: external_exports.string().default("").describe('Must be "USER_CONFIRMED" to enable. This is set by the /unsafe-ce command.')
     },
@@ -23252,11 +23250,7 @@ Prefer: ce_scan_value, ce_read_memory, ce_write_memory, ce_mono_*, etc.
 
 The code runs as a function body: \`return\` its result (numbers, strings, several values are tab-separated),
 or assign a string to _mcp_str. Errors are reported as LUA_ERROR / LUA_SYNTAX_ERROR.
-
-ERROR HANDLING:
-- If this hangs or fails repeatedly, STOP and ask the user to check CE
-- A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs)
-- Don't retry more than 2-3 times - report failure to user`,
+A dialog the code opens in CE blocks it: the call then reports the dialog (see ce_dialogs). After 2-3 failures, report to the user instead of retrying.`,
     schema: {
       code: external_exports.string().describe("Lua code to execute in Cheat Engine")
     },
@@ -23325,7 +23319,7 @@ function listBody(collect, noun, { filter, offset, limit }) {
 var POLL_MS = 250;
 var MAX_WAIT_MS = 10 * 6e4;
 var waitSchema = {
-  wait: external_exports.boolean().default(true).describe("Wait for the result (default). false returns a job id at once: read it later with ce_job_status")
+  wait: external_exports.boolean().default(true).describe("Wait for the result. false returns a job id at once: read it later with ce_job_status")
 };
 function parseLine(line) {
   const [status = "missing", done = "0", total = "0", ...message] = (line ?? "").split("|");
@@ -23873,7 +23867,7 @@ var NEXT_SCAN_TYPES = {
   unchanged: "soUnchanged"
 };
 var NO_VALUE = /* @__PURE__ */ new Set(["unknown", "increased", "decreased", "changed", "unchanged"]);
-var scanName = external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("main").describe('Name of the scan, to run several scans side by side (default "main")');
+var scanName = external_exports.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("main").describe("Name of the scan, to run several scans side by side");
 function existingScan(name, ready = false) {
   return lua`
     local s = _mcp.scans[${name}]
@@ -23942,17 +23936,9 @@ function firstScan(spec) {
 var scanTools = [
   defineTool({
     name: "ce_scan_value",
-    description: `Start a new memory scan for a value. This is the first step in finding memory addresses.
+    description: `Start a new memory scan for a value: the usual first step to find a game value (health, gold, ammo...), simpler than the ce_mono_* tools when the class structure is unknown.
 
-RECOMMENDED FIRST APPROACH: Use this before trying ce_mono_* functions.
-For finding game values (health, gold, ammo, strings), scanning is simpler than
-reverse engineering class structures.
-
-The scan runs in the background (CE shows its progress); up to 10 results are listed directly.
-Then: change the value in the game and refine with ce_scan_next.
-
-ERROR HANDLING:
-- If scan hangs or returns no results after 2-3 attempts, STOP and ask user`,
+The scan runs in the background (CE shows its progress); up to 10 results are listed directly. Then change the value in the game and refine with ce_scan_next. When repeated scans find nothing, the value may be stored differently (float, scaled, encrypted): ask the user rather than guess.`,
     schema: {
       value: external_exports.string().default("").describe("Value to search for, e.g. '100' or '3.14' (not needed for scan_type 'unknown')"),
       value_type: external_exports.enum(Object.keys(VAR_TYPES)).default("int32").describe("Value type; 'all' = int32, float and double at once"),
@@ -25222,7 +25208,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_static",
-    description: `Read the static fields of a class (singletons like Player.Instance, game managers): one call to the collector for the static data address, then plain memory reads.`,
+    description: `Read the static fields of a class (singletons like Player.Instance, game managers). Mono: one call to the collector for the static data address, then plain memory reads. IL2CPP: each field is read by the collector; struct-typed static fields are not read (they would overflow the collector's buffer in the game).`,
     schema: {
       class_name: classArg,
       field_name: external_exports.string().default("").describe("Only this static field (default: all of them)"),
@@ -25284,7 +25270,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_find_instances",
-    description: `Find the objects of a class in memory: a read-only memory scan for the class's vtable pointer (every object starts with it), never a walk of the managed heap. Runs in the background with a progress window.
+    description: `Find the objects of a class in memory: a read-only memory scan for the pointer every object starts with (the class's vtable with Mono, the class itself with IL2CPP), never a walk of the managed heap. Runs in the background with a progress window.
 
 Recently freed objects can still match until the GC reuses their memory: check a result with ce_mono_dump.`,
     schema: {
@@ -25989,8 +25975,8 @@ try {
   setSyncError(err.message);
   logger.error("CE plugin script sync failed:", err);
 }
-var session = new Session(PIPE_PATH, "0.3.0");
-var server = createServer(session, allTools, "0.3.0");
+var session = new Session(PIPE_PATH, "0.3.1");
+var server = createServer(session, allTools, "0.3.1");
 var stopping = false;
 async function stop() {
   if (stopping) return;
@@ -26003,4 +25989,4 @@ process.stdin.on("end", () => void stop());
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
 await server.connect(new StdioServerTransport());
-logger.info(`asymptomatik-cheatengine ${"0.3.0"} ready (${allTools.length} tools)`);
+logger.info(`asymptomatik-cheatengine ${"0.3.1"} ready (${allTools.length} tools)`);
