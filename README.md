@@ -36,7 +36,7 @@ Everything runs on your machine: the plugin talks to Cheat Engine through a loca
 3. Restart Cheat Engine. Its main window now has an **MCP** menu and a status label.
 4. Ask Claude to check: "ce_status" — it should say `Connected: Lua 5.3 - CE 7.7 ...` and `loader installed`.
 
-Updates of the plugin reach Cheat Engine by themselves: the loader runs a per-user copy of the CE script (`%LOCALAPPDATA%\cheatengine-mcp\`) that the plugin refreshes at every start. `/ce-install` is only needed again if `ce_status` reports the loader as missing or outdated.
+Updates of the plugin reach Cheat Engine by themselves: the loader runs a per-user copy of the CE script (`%LOCALAPPDATA%\cheatengine-mcp\`) that the plugin refreshes at every start. A running Cheat Engine keeps the script it started with: `ce_status` says when it runs an older copy, and `ce_restart` restarts it. `/ce-install` is only needed again if `ce_status` reports the loader as missing or outdated.
 
 ## Safety
 
@@ -44,8 +44,8 @@ Two independent locks, plus an anti-cheat guard:
 
 | | What it locks | Default | Change it |
 |---|---|---|---|
-| **SAFE mode** | The tools that can **crash the game or Cheat Engine**: `ce_lua`, code injection (`ce_asm_inject`, `ce_asm_script`, `ce_code_entry`), debugger watchpoints (`ce_breakpoint`), DLL injection (`ce_speedhack`, `ce_d3d_init`, `ce_mono_init`), `.CT` tables (they can run scripts), `ce_mono_find_instances`, Mono static fields | **On** at every start | `/unsafe-ce` and `/safe-ce`, or *Mode* in CE's MCP menu. Claude cannot run `/unsafe-ce` itself, and the unlock only happens once **you click Yes in a dialog in Cheat Engine** |
-| **Anti-cheat guard** | **Every tool** on a process that embeds an anti-cheat (EasyAntiCheat, BattlEye, Vanguard, XIGNCODE, nProtect GameGuard, ACE, mhyprot, EQU8, FACEIT, Denuvo Anti-Cheat, Wellbia, or Unity's Anti-Cheat Toolkit): even attaching | On, in SAFE mode | Claude must first tell you why (your account can be banned); only `/unsafe-ce`, whose CE dialog repeats the warning, lifts it |
+| **SAFE mode** | The tools that can **crash the game or Cheat Engine**: `ce_lua`, code injection (`ce_asm_inject`, `ce_asm_script` except its syntax check `check_only`, `ce_code_entry`), debugger watchpoints (`ce_breakpoint`), DLL injection (`ce_speedhack`, `ce_d3d_init`, `ce_mono_init`), `.CT` tables (they can run scripts), `ce_mono_find_instances`, Mono static fields | **On** at every start | `/unsafe-ce` and `/safe-ce`, or *Mode* in CE's MCP menu. Claude cannot run `/unsafe-ce` itself, and the unlock only happens once **you click Yes in a dialog in Cheat Engine** |
+| **Anti-cheat guard** | **Every tool** on a process that embeds an anti-cheat (EasyAntiCheat, BattlEye, Vanguard, XIGNCODE (Wellbia), nProtect GameGuard, ACE, mhyprot, EQU8, FACEIT, Denuvo Anti-Cheat, or Unity's Anti-Cheat Toolkit): even attaching | On, in SAFE mode | Claude must first tell you why (your account can be banned); only `/unsafe-ce` lifts it. Its CE dialog names the anti-cheat when the protected game is already attached in CE; otherwise the warning comes from Claude, when the attach is refused |
 | **Read-only option** | Everything that **changes the game or writes a file** (memory writes, freezes, hotkeys, patches, table saves...) | Off | `/plugin configure asymptomatik-cheatengine` → `read_only` |
 
 Reading, scanning, writing values and freezing are what Cheat Engine is for: they stay available in SAFE mode.
@@ -98,7 +98,7 @@ Some details worth knowing:
 
 **Overlays do not show** — CE's D3D hook only supports DirectX 9, 10 and 11, and does not work with every game. The overlay tool warns when the hook has not seen any frame of the game.
 
-**Mono tools fail** — run `ce_mono_init` first (it can take a minute); Mono tools only apply to .NET / Unity games.
+**Mono tools fail** — run `ce_mono_init` first (it injects CE's collector DLL, so it needs `/unsafe-ce`, and can take a minute); Mono tools only apply to .NET / Unity games.
 
 ## How it works
 
