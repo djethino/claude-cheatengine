@@ -13562,6 +13562,57 @@ function lua(strings, ...values) {
 // src/lua/prelude.lua
 var prelude_default = "-- First script of every connection from the MCP server (src/ce/session.ts), run in CE's Lua state.\n-- _mcp_server = { owner, version, resetSafe, lapse } is set just before this code.\n--\n-- Helpers live here rather than in the CE plugin (ce-plugin/ce-mcp-server.lua): the plugin is\n-- only loaded when CE starts, so a CE launched before a plugin update would lack new helpers.\n\nlocal server = _mcp_server\n_mcp_server = nil\n\n-- Claim CE unless another server is still using it (its last call is recent)\nif _mcp_owner == nil or _mcp_owner == server.owner or os.time() - (_mcp_owner_seen or 0) > server.lapse then\n  _mcp_owner = server.owner\n  _mcp_owner_seen = os.time()\n  -- SAFE mode is on whenever a server starts: an earlier session's unlock does not carry over\n  if server.resetSafe then\n    _mcp_unsafe = false\n    if updateMenuState then pcall(updateMenuState) end\n  end\nend\n\n-- Kept across reconnections of the same CE session (running jobs survive a server restart).\n-- STATE is the format of what _mcp holds: bump it whenever that format changes, so the state left\n-- in CE by an older server version is discarded instead of being misread.\nlocal STATE = 2\nif _mcp and _mcp.state ~= STATE then\n  for _, s in pairs(_mcp.scans or {}) do\n    pcall(function()\n      if type(s) == 'table' and s.ms then\n        if s.fl then s.fl.destroy() end\n        s.ms.destroy()\n      else\n        s.destroy()\n      end\n    end)\n  end\n  for _, job in pairs(_mcp.jobs or {}) do\n    job.cancelled = true\n    if job.form then pcall(job.form.destroy) end\n  end\n  if _mcp.jobTimer then pcall(_mcp.jobTimer.destroy) end\n  _mcp = nil\nend\n_mcp = _mcp or { state = STATE }\n_mcp.version = server.version\n_mcp.jobs = _mcp.jobs or {}\n_mcp.nextJob = _mcp.nextJob or 0\n\n--------------------------------------------------------------------------------\n-- Jobs: long operations run without blocking CE's main thread.\n--\n-- spec = {\n--   kind = 'pointer scan',             -- shown in the progress window and job status\n--   run = function(job, thread) end,    -- optional, runs in a CE thread; check job.cancelled\n--   update = function(job) end,         -- optional, main thread: refresh job.done/total/message\n--   finish = function(job) return 'result text' end,  -- main thread, once run has returned\n--   window = true,                      -- show a progress window with a Cancel button\n-- }\n-- job.status: running -> finishing -> done | cancelled | error\n--------------------------------------------------------------------------------\n\nlocal function closeWindow(job)\n  if job.form then\n    pcall(function() job.form.destroy() end)\n    job.form = nil\n  end\nend\n\nlocal function openWindow(job)\n  local form = createForm(false)\n  form.Caption = 'CE MCP - ' .. job.kind\n  form.Width, form.Height = 360, 110\n  form.Position = 'poScreenCenter'\n  form.BorderStyle = 'bsSingle'\n  local label = createLabel(form)\n  label.Left, label.Top = 12, 10\n  label.Caption = job.kind .. '...'\n  local bar = createProgressBar(form)\n  bar.Left, bar.Top, bar.Width, bar.Height = 12, 32, 336, 18\n  bar.Max = 1000\n  local cancel = createButton(form)\n  cancel.Caption = 'Cancel'\n  cancel.Left, cancel.Top, cancel.Width = 274, 60, 75\n  cancel.OnClick = function() _mcp.cancelJob(job.id) end\n  form.OnClose = function() _mcp.cancelJob(job.id) return caHide end\n  form.show()\n  job.form, job.label, job.bar = form, label, bar\nend\n\nlocal function refreshWindow(job)\n  if not job.form then return end\n  local text = job.message ~= '' and job.message or (job.kind .. '...')\n  if job.total and job.total > 0 then\n    job.bar.Position = math.floor(1000 * math.min(job.done, job.total) / job.total)\n    text = string.format('%s (%d%%)', text, math.floor(100 * math.min(job.done, job.total) / job.total))\n  end\n  job.label.Caption = text\nend\n\n-- Main-thread step of a job: progress refresh, then finish once its thread has returned\nfunction _mcp.stepJob(job)\n  if job.status ~= 'running' and job.status ~= 'finishing' then return end\n  if job.spec.update then\n    local ok, err = pcall(job.spec.update, job)\n    if not ok then job.status, job.error = 'error', tostring(err) end\n  end\n  if job.status == 'finishing' then\n    if job.cancelled then\n      job.status = 'cancelled'\n    else\n      local ok, result = pcall(job.spec.finish, job)\n      if ok then job.status, job.result = 'done', tostring(result) else job.status, job.error = 'error', tostring(result) end\n    end\n  end\n  if job.status == 'running' or job.status == 'finishing' then refreshWindow(job) else closeWindow(job) end\nend\n\nfunction _mcp.startJob(spec)\n  _mcp.nextJob = _mcp.nextJob + 1\n  local job = { id = _mcp.nextJob, kind = spec.kind, spec = spec, status = 'running', done = 0, total = nil,\n                message = '', cancelled = false, started = os.time() }\n  _mcp.jobs[job.id] = job\n  if spec.window then openWindow(job) end\n  if spec.run then\n    createThread(function(thread)\n      thread.Name = 'CE MCP ' .. spec.kind\n      local ok, err = pcall(spec.run, job, thread)\n      if not ok and job.status == 'running' then job.status, job.error = 'error', tostring(err) end\n      if job.status == 'running' then job.status = 'finishing' end\n    end)\n  else\n    job.status = 'finishing'\n  end\n  -- A timer keeps windows and finished jobs moving even when no MCP call polls them\n  if not _mcp.jobTimer then\n    _mcp.jobTimer = createTimer()\n    _mcp.jobTimer.Interval = 200\n    _mcp.jobTimer.OnTimer = function()\n      local active = false\n      for _, j in pairs(_mcp.jobs) do\n        _mcp.stepJob(j)\n        if j.status == 'running' or j.status == 'finishing' then active = true end\n      end\n      if not active then _mcp.jobTimer.Enabled = false end\n    end\n  end\n  _mcp.jobTimer.Enabled = true\n  return job\nend\n\nfunction _mcp.cancelJob(id)\n  local job = _mcp.jobs[id]\n  if job and (job.status == 'running' or job.status == 'finishing') then job.cancelled = true end\n  return job\nend\n\n--------------------------------------------------------------------------------\n-- Named scans (src/tools/scan.ts): _mcp.scans[name] = { ms = memscan, fl = foundlist, ready = bool }\n-- One FoundList per memscan, kept for the scan's life: destroying a FoundList leaves the memscan\n-- pointing at it, and the next nextScan() aborts the whole script without any Lua error (seen on\n-- CE 7.7). It is deinitialized while a scan runs and initialized again once it is done.\n--------------------------------------------------------------------------------\n_mcp.scans = _mcp.scans or {}\n\nfunction _mcp.dropScan(name)\n  local s = _mcp.scans[name]\n  if not s then return false end\n  _mcp.scans[name] = nil\n  if s.fl then\n    if s.ready then pcall(s.fl.deinitialize) end\n    s.fl.destroy()\n  end\n  s.ms.destroy()\n  return true\nend\n\n-- Before a next scan: release the results file the FoundList holds open\nfunction _mcp.scanBegin(s)\n  if s.ready then s.fl.deinitialize() end\n  s.ready = false\nend\n\n-- After a scan: open its results for reading\nfunction _mcp.scanEnd(s)\n  s.fl = s.fl or createFoundList(s.ms)\n  s.fl.initialize()\n  s.ready = true\nend\n\n-- One-line status for the MCP server: status|done|total|message\nfunction _mcp.jobLine(id)\n  local job = _mcp.jobs[id]\n  if not job then return 'missing|0|0|' end\n  _mcp.stepJob(job)\n  local message = (job.error or job.message or ''):gsub('[\\r\\n|]', ' ')\n  return string.format('%s|%d|%d|%s', job.status, math.floor(job.done or 0), math.floor(job.total or 0), message)\nend\n\nprint(string.format('[CE-MCP] asymptomatik-cheatengine %s connected - Mode: %s', server.version, _mcp_unsafe and 'UNSAFE' or 'SAFE'))\n";
 
+// src/anticheat.ts
+import { existsSync, readFileSync, readdirSync } from "fs";
+import { basename, dirname, extname, join } from "path";
+var MODULE_SIGNATURES = [
+  ["easyanticheat", "Easy Anti-Cheat"],
+  ["eac_launcher", "Easy Anti-Cheat"],
+  ["beclient", "BattlEye"],
+  ["battleye", "BattlEye"],
+  ["x3.xem", "XIGNCODE3"],
+  ["xigncode", "XIGNCODE3"],
+  ["npggnt", "nProtect GameGuard"],
+  ["gameguard", "nProtect GameGuard"],
+  ["gamemon", "nProtect GameGuard"],
+  ["ace-base", "Anti-Cheat Expert (ACE)"],
+  ["ace-ats", "Anti-Cheat Expert (ACE)"],
+  ["acebase", "Anti-Cheat Expert (ACE)"],
+  ["mhyprot", "mhyprot (HoYoverse)"],
+  ["equ8", "EQU8"],
+  ["faceit", "FACEIT"],
+  ["vanguard", "Riot Vanguard"],
+  ["denuvo-anti-cheat", "Denuvo Anti-Cheat"],
+  ["wellbia", "XIGNCODE3"]
+];
+var ACTK_ASSEMBLIES = ["ACTk.Runtime.dll", "CodeStage.AntiCheat.dll"];
+var ACTK_MARKER = Buffer.from("CodeStage.AntiCheat");
+function detectFromModules(moduleNames) {
+  const found = /* @__PURE__ */ new Set();
+  for (const name of moduleNames) {
+    const lower = name.toLowerCase();
+    for (const [needle, label] of MODULE_SIGNATURES) if (lower.includes(needle)) found.add(label);
+  }
+  return [...found];
+}
+function detectActk(exePath) {
+  if (!exePath || !existsSync(exePath)) return false;
+  const dataDir = join(dirname(exePath), `${basename(exePath, extname(exePath))}_Data`);
+  const managed = join(dataDir, "Managed");
+  if (existsSync(managed)) {
+    const files = readdirSync(managed);
+    if (ACTK_ASSEMBLIES.some((assembly) => files.includes(assembly))) return true;
+  }
+  const metadata = join(dataDir, "il2cpp_data", "Metadata", "global-metadata.dat");
+  return existsSync(metadata) && readFileSync(metadata).includes(ACTK_MARKER);
+}
+function detectAntiCheat(moduleNames, exePath) {
+  const found = detectFromModules(moduleNames);
+  if (detectActk(exePath)) found.push("Unity Anti-Cheat Toolkit (ACTk)");
+  return found;
+}
+var ANTI_CHEAT_ADVICE = "Using Cheat Engine on it can get the player's account banned (online play, leaderboards, cloud saves). Tell the user this reason before doing anything else. Only if they accept the risk can they run /unsafe-ce; never unlock it yourself.";
+
 // src/ce/session.ts
 var PIPE_PATH = "\\\\.\\pipe\\ce-mcp";
 var DEFAULT_MAX_BYTES = 1e4;
@@ -13572,6 +13623,7 @@ var MIN_CE_VERSION = 770;
 var OWNER_LAPSE_S = 60;
 var MARK_OWNER = "OWNER";
 var MARK_INIT = "INIT";
+var MARK_AC = "AC";
 var BLOCKED_DANGEROUS = "BLOCKED: this tool can crash the game or CE, and SAFE mode is on. Ask the user to run /unsafe-ce (or toggle Mode in the CE MCP menu) if they want it.";
 var BLOCKED_NO_PROCESS = "BLOCKED: no process attached. Use ce_attach first.";
 var Mutex = class {
@@ -13613,7 +13665,8 @@ var Session = class {
         await new Promise((resolve3) => setTimeout(resolve3, ms));
         release = await this.mutex.acquire();
       },
-      takeOver: () => this.takeOver()
+      takeOver: () => this.takeOver(),
+      antiCheatOf: (pid) => this.antiCheatOf(pid)
     };
     try {
       return await fn(scope);
@@ -13678,11 +13731,18 @@ var Session = class {
       end
       _mcp_owner_seen = os.time()
       _mcp_str = nil
+      local _pid = getOpenedProcessID() or 0
+      local _ac = (_mcp.ac or {})[_pid]
+      if ${options.antiCheatGate ?? false} and _pid ~= 0 and _ac == nil then
+        _mcp_str = ${MARK_AC} .. _pid return #_mcp_str
+      end
       ${log}
       if ${options.dangerous ?? false} and _mcp_unsafe ~= true then
         _mcp_str = ${BLOCKED_DANGEROUS}
-      elseif ${options.requiresProcess ?? false} and (getOpenedProcessID() or 0) == 0 then
+      elseif ${options.requiresProcess ?? false} and _pid == 0 then
         _mcp_str = ${BLOCKED_NO_PROCESS}
+      elseif ${options.antiCheatGate ?? false} and _pid ~= 0 and _ac ~= '' and _mcp_unsafe ~= true then
+        _mcp_str = 'BLOCKED: anti-cheat detected in ' .. tostring(process or _pid) .. ': ' .. _ac .. '. ' .. ${ANTI_CHEAT_ADVICE}
       else
         local f, e = load(${body.code}, ${"=" + (call?.tool ?? "cemcp")})
         if not f then
@@ -13719,12 +13779,39 @@ var Session = class {
       this.readyConnection = -1;
       text = await runOnce();
     }
+    if (text?.startsWith(MARK_AC)) {
+      await this.antiCheatOf(Number(text.slice(MARK_AC.length)));
+      text = await runOnce();
+    }
     if (text === MARK_OWNER) {
       throw new OwnershipError(
         "Another Claude Code session is using Cheat Engine. Call ce_status with take_over=true to take it over (the other session will then get this message)."
       );
     }
     return text;
+  }
+  /**
+   * Anti-cheats found in a process (empty when none), detected once per PID and kept in CE
+   * (_mcp.ac) so every server and every tool sees the same verdict. Works on a process CE has not
+   * opened yet (ce_attach checks before attaching).
+   */
+  async antiCheatOf(pid) {
+    const cached2 = await this.query(lua`local ac = (_mcp.ac or {})[${pid}] if ac then _mcp_str = '=' .. ac end`);
+    if (cached2 !== null) return cached2.slice(1) ? cached2.slice(1).split(", ") : [];
+    const listing = await this.query(lua`
+      local mods = enumModules(${pid}) or {}
+      local names = {}
+      for i, m in ipairs(mods) do names[i] = m.Name end
+      _mcp_str = (mods[1] and mods[1].PathToFile or '') .. '\n' .. table.concat(names, '\n')`);
+    const [exePath = "", ...modules] = (listing ?? "").split("\n");
+    const found = detectAntiCheat(modules, exePath);
+    await this.runInt(lua`_mcp.ac = _mcp.ac or {} _mcp.ac[${pid}] = ${found.join(", ")} return 1`);
+    return found;
+  }
+  /** Run protocol-internal Lua that leaves a text in _mcp_str (no gate, no log, no truncation). */
+  async query(body) {
+    const length = await this.runInt(this.chunk(null, body, {}));
+    return length ? this.readString("_mcp_str", Number(length), Number(length), 0) : null;
   }
   /** Read part of the text kept for continuation by the last truncated output. */
   async readMore(offset, maxBytes) {
@@ -21985,7 +22072,7 @@ async function callTool(session2, tool, args, extra) {
       const ctx = {
         scope,
         signal: extra.signal,
-        run: (body, options) => scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false }),
+        run: (body, options) => scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
         async progress(done, total, message) {
           if (progressToken === void 0) return;
           await extra.sendNotification({
@@ -22028,13 +22115,13 @@ function createServer(session2, tools, version2) {
 }
 
 // src/tools/install.ts
-import { existsSync as existsSync2 } from "fs";
-import { join as join2 } from "path";
+import { existsSync as existsSync3 } from "fs";
+import { join as join3 } from "path";
 
 // src/install.ts
 import { execFile } from "child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { existsSync as existsSync2, lstatSync, mkdirSync, readFileSync as readFileSync2, readdirSync as readdirSync2, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { basename as basename2, join as join2 } from "path";
 import { promisify } from "util";
 
 // ce-plugin/ce-mcp-server.lua
@@ -22126,11 +22213,6 @@ function CEMCP_getLogs(clear)
     CEMCP_logBuffer = {}
   end
   return logs
-end
-
--- Clear logs
-function CEMCP_clearLogs()
-  CEMCP_logBuffer = {}
 end
 
 local function notify(message)
@@ -22425,137 +22507,10 @@ function showLogWindow()
 end
 
 --------------------------------------------------------------------------------
--- Breakpoint Handler for MCP
+-- Functions called by the MCP server
 --------------------------------------------------------------------------------
 
--- Persistent storage for breakpoint hits (survives across MCP calls)
-CEMCP_breakpointHits = {}
-CEMCP_activeBreakpoints = {}
-
--- Set a breakpoint with MCP-compatible callback
-function CEMCP_setBreakpoint(address, bpType, size)
-  local addr = getAddress(address)
-  if not addr then
-    return { error = "Invalid address" }
-  end
-
-  -- Clear previous hits for this address
-  CEMCP_breakpointHits[addr] = {}
-
-  local bpTypeMap = {
-    access = bptAccess,
-    write = bptWrite,
-    execute = bptExecute
-  }
-  local bp = bpTypeMap[bpType] or bptAccess
-
-  debug_setBreakpoint(addr, size or 4, bp, function()
-    -- All code in pcall to catch any errors
-    local ok, err = pcall(function()
-      -- RIP/EIP are global variables set by CE when breakpoint hits
-      local rip = RIP or EIP or 0
-      local disasmText = "unknown"
-
-      -- Disassemble the instruction (safely)
-      if rip ~= 0 then
-        local dok, dresult = pcall(disassemble, rip)
-        if dok and dresult then
-          disasmText = dresult
-        end
-      end
-
-      -- Capture registers (64-bit with 32-bit fallback)
-      local hit = {
-        address = rip,
-        disasm = disasmText,
-        regs = {
-          rax = RAX or EAX or 0,
-          rbx = RBX or EBX or 0,
-          rcx = RCX or ECX or 0,
-          rdx = RDX or EDX or 0,
-          rsi = RSI or ESI or 0,
-          rdi = RDI or EDI or 0,
-          rbp = RBP or EBP or 0,
-          rsp = RSP or ESP or 0,
-        }
-      }
-
-      -- Store in our persistent table
-      if not CEMCP_breakpointHits[addr] then
-        CEMCP_breakpointHits[addr] = {}
-      end
-      table.insert(CEMCP_breakpointHits[addr], hit)
-    end)
-
-    if not ok then
-      print('[CE-MCP] BP callback error: ' .. tostring(err))
-    end
-
-    -- Remove after 20 hits to prevent memory bloat
-    if #CEMCP_breakpointHits[addr] >= 20 then
-      debug_removeBreakpoint(addr)
-      CEMCP_activeBreakpoints[addr] = nil
-      log("Breakpoint auto-removed after 20 hits")
-    end
-
-    return 0  -- Continue execution without pausing (0=continue, 1=break)
-  end)
-
-  CEMCP_activeBreakpoints[addr] = true
-  log(string.format("Breakpoint set at 0x%X (%s, %d bytes)", addr, bpType, size or 4))
-
-  return { success = true, address = addr }
-end
-
--- Get breakpoint hits
-function CEMCP_getBreakpointHits(address)
-  if address then
-    local addr = getAddress(address)
-    return CEMCP_breakpointHits[addr] or {}
-  else
-    -- Return all hits
-    local allHits = {}
-    for addr, hits in pairs(CEMCP_breakpointHits) do
-      for _, hit in ipairs(hits) do
-        hit.targetAddress = addr
-        table.insert(allHits, hit)
-      end
-    end
-    return allHits
-  end
-end
-
--- Clear breakpoint hits
-function CEMCP_clearBreakpointHits(address)
-  if address then
-    local addr = getAddress(address)
-    CEMCP_breakpointHits[addr] = {}
-  else
-    CEMCP_breakpointHits = {}
-  end
-end
-
--- Remove a breakpoint
-function CEMCP_removeBreakpoint(address)
-  if address then
-    local addr = getAddress(address)
-    debug_removeBreakpoint(addr)
-    CEMCP_activeBreakpoints[addr] = nil
-    CEMCP_breakpointHits[addr] = nil
-  else
-    debug_removeBreakpoint()
-    CEMCP_activeBreakpoints = {}
-    CEMCP_breakpointHits = {}
-  end
-end
-
---------------------------------------------------------------------------------
--- Enhanced Lua Functions for MCP
---------------------------------------------------------------------------------
-
--- These functions provide better formatted output for MCP consumption
-
--- Called by MCP server to log commands to CE console
+-- Log a command to the CE console and the MCP log window
 function CEMCP_logCommand(toolName, args)
   CEMCP.commandCount = CEMCP.commandCount + 1
   CEMCP.lastCommandTime = os.time()
@@ -22567,125 +22522,27 @@ function CEMCP_logCommand(toolName, args)
   updateMenuState()
 end
 
--- Check if writes are allowed (called by MCP for verification)
-function CEMCP_isUnsafe()
-  return checkUnsafeMode()
-end
-
--- Get current security mode as string
-function CEMCP_getSecurityMode()
-  checkUnsafeMode()
-  return CEMCP.isUnsafe and "unsafe" or "safe"
-end
-
-function CEMCP_getProcessInfo()
-  local pid = getOpenedProcessID()
-  if not pid or pid == 0 then
-    return { attached = false }
-  end
-
-  return {
-    attached = true,
-    pid = pid,
-    is64bit = targetIs64Bit(),
-    processName = process or "Unknown"
-  }
-end
-
-function CEMCP_readMemoryTable(address, dataType, count)
-  count = count or 1
-  local results = {}
-  local addr = getAddress(address)
-
-  if not addr then
-    return { error = "Invalid address: " .. tostring(address) }
-  end
-
-  local readFunc = {
-    byte = readBytes,
-    int16 = readSmallInteger,
-    int32 = readInteger,
-    int64 = readQword,
-    float = readFloat,
-    double = readDouble,
-  }
-
-  local func = readFunc[dataType]
-  if not func then
-    return { error = "Unknown type: " .. tostring(dataType) }
-  end
-
-  local size = ({ byte=1, int16=2, int32=4, int64=8, float=4, double=8 })[dataType]
-
-  for i = 1, count do
-    local value = func(addr + (i-1) * size)
-    table.insert(results, {
-      address = string.format("0x%X", addr + (i-1) * size),
-      value = value
-    })
-  end
-
-  return results
-end
-
-function CEMCP_scanValue(valueType, value, startAddr, stopAddr)
-  -- Map valueType string to CE variable type constant
-  local vtMap = {
-    byte = vtByte,
-    int8 = vtByte,
-    int16 = vtWord,
-    int32 = vtDword,
-    int64 = vtQword,
-    float = vtSingle,
-    double = vtDouble,
-    string = vtString,
-    aob = vtByteArray,
-  }
-  local vt = vtMap[valueType] or vtDword
-
-  -- Configure scan
-  local ms = getMemScan()
-  if not ms then
-    ms = createMemScan()
-  end
-
-  ms.firstScan(
-    soExactValue,           -- Scan option
-    vt,                     -- Variable type (mapped from valueType)
-    rtRounded,              -- Round type
-    value,                  -- Value to find
-    nil,                    -- Second value (for between scans)
-    startAddr or 0,         -- Start address
-    stopAddr or 0x7FFFFFFF, -- Stop address
-    "*X*W",                 -- Protection flags
-    fsmNotAligned,          -- Fast scan method
-    nil,                    -- Fast scan alignment
-    false,                  -- Hex input
-    false,                  -- Unicode
-    false                   -- Case sensitive
-  )
-
-  ms.waitTillDone()
-
-  local fl = createFoundList(ms)
-  fl.initialize()
-
-  local results = {}
-  for i = 0, math.min(fl.Count - 1, 100) do
-    table.insert(results, fl.Address[i])
-  end
-
-  fl.destroy()
-
-  return results
-end
-
 --------------------------------------------------------------------------------
 -- Initialization
 --------------------------------------------------------------------------------
 
+-- FNV-1a (32-bit) of this script's own file: the MCP server compares it with the copy it ships,
+-- to tell the user to restart CE when CE still runs an older plugin script
+local function scriptHash()
+  local source = debug.getinfo(1, 'S').source
+  if source:sub(1, 1) ~= '@' then return nil end
+  local f = io.open(source:sub(2), 'rb')
+  if not f then return nil end
+  local data = f:read('a')
+  f:close()
+  local h = 2166136261
+  for i = 1, #data do h = ((h ~ data:byte(i)) * 16777619) & 0xFFFFFFFF end
+  return h
+end
+
 local function initialize()
   log("Initializing CE-MCP plugin...")
+  CEMCP.scriptHash = scriptHash()
 
   -- Create menu (delayed to ensure main form is ready)
   createTimer().OnTimer = function(timer)
@@ -22708,8 +22565,8 @@ initialize()
 
 // src/install.ts
 var run = promisify(execFile);
-var USER_DIR = join(process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local"), "cheatengine-mcp");
-var USER_SCRIPT = join(USER_DIR, "ce-mcp-server.lua");
+var USER_DIR = join2(process.env.LOCALAPPDATA ?? join2(process.env.USERPROFILE ?? "", "AppData", "Local"), "cheatengine-mcp");
+var USER_SCRIPT = join2(USER_DIR, "ce-mcp-server.lua");
 var LOADER_NAME = "ce-mcp-loader.lua";
 var LEGACY_NAME = "ce-mcp-server.lua";
 var LEGACY_MARKER = "Cheat Engine MCP Server Plugin";
@@ -22726,10 +22583,10 @@ end
 `;
 var ELEVATION_TIMEOUT_MS = 12e4;
 function powershellPath() {
-  return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return join2(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 function regPath() {
-  return join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "reg.exe");
+  return join2(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "reg.exe");
 }
 async function regValues(key, view) {
   try {
@@ -22747,7 +22604,7 @@ async function regValues(key, view) {
 async function ceUninstallKeys(root, view) {
   try {
     const { stdout } = await run(regPath(), ["query", root, "/f", "Cheat Engine", "/k", view], { windowsHide: true });
-    return stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("HKEY_") && basename(line).startsWith("Cheat Engine"));
+    return stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("HKEY_") && basename2(line).startsWith("Cheat Engine"));
   } catch {
     return [];
   }
@@ -22757,7 +22614,7 @@ async function findCeDirs() {
   const add = (path) => {
     if (!path) return;
     const clean = path.replace(/[\\/]+$/, "");
-    if (existsSync(join(clean, "autorun")) && !found.some((p) => p.toLowerCase() === clean.toLowerCase())) found.push(clean);
+    if (existsSync2(join2(clean, "autorun")) && !found.some((p) => p.toLowerCase() === clean.toLowerCase())) found.push(clean);
   };
   for (const hive of ["HKLM", "HKCU"]) {
     for (const view of ["/reg:64", "/reg:32"]) {
@@ -22770,13 +22627,18 @@ async function findCeDirs() {
   }
   for (const env of ["ProgramFiles", "ProgramFiles(x86)"]) {
     const base = process.env[env];
-    if (!base || !existsSync(base)) continue;
-    for (const name of readdirSync(base)) if (name.startsWith("Cheat Engine")) add(join(base, name));
+    if (!base || !existsSync2(base)) continue;
+    for (const name of readdirSync2(base)) if (name.startsWith("Cheat Engine")) add(join2(base, name));
   }
   return found;
 }
+function pluginScriptHash() {
+  let h = 2166136261;
+  for (const byte of Buffer.from(ce_mcp_server_default, "utf8")) h = Math.imul(h ^ byte, 16777619) >>> 0;
+  return h;
+}
 function syncUserScript() {
-  if (existsSync(USER_SCRIPT) && readFileSync(USER_SCRIPT, "utf8") === ce_mcp_server_default) return false;
+  if (existsSync2(USER_SCRIPT) && readFileSync2(USER_SCRIPT, "utf8") === ce_mcp_server_default) return false;
   mkdirSync(USER_DIR, { recursive: true });
   const tmp = `${USER_SCRIPT}.tmp`;
   writeFileSync(tmp, ce_mcp_server_default, "utf8");
@@ -22784,10 +22646,10 @@ function syncUserScript() {
   return true;
 }
 function legacyInstall(autorun) {
-  const legacy = join(autorun, LEGACY_NAME);
-  if (!existsSync(legacy) && !isLink(legacy)) return null;
-  if (isLink(legacy)) return basename(readlinkSync(legacy)) === LEGACY_NAME ? legacy : null;
-  return statSync(legacy).isFile() && readFileSync(legacy, "utf8").slice(0, 512).includes(LEGACY_MARKER) ? legacy : null;
+  const legacy = join2(autorun, LEGACY_NAME);
+  if (!existsSync2(legacy) && !isLink(legacy)) return null;
+  if (isLink(legacy)) return basename2(readlinkSync(legacy)) === LEGACY_NAME ? legacy : null;
+  return statSync(legacy).isFile() && readFileSync2(legacy, "utf8").slice(0, 512).includes(LEGACY_MARKER) ? legacy : null;
 }
 function isLink(path) {
   try {
@@ -22797,12 +22659,12 @@ function isLink(path) {
   }
 }
 function loaderStatus(ceDir) {
-  const autorun = join(ceDir, "autorun");
-  const loader = join(autorun, LOADER_NAME);
+  const autorun = join2(ceDir, "autorun");
+  const loader = join2(autorun, LOADER_NAME);
   const legacy = legacyInstall(autorun);
   let state;
-  if (existsSync(loader)) {
-    state = readFileSync(loader, "utf8") === LOADER ? "loader installed" : "loader outdated, run /ce-install";
+  if (existsSync2(loader)) {
+    state = readFileSync2(loader, "utf8") === LOADER ? "loader installed" : "loader outdated, run /ce-install";
     if (legacy) state += ` (legacy ${LEGACY_NAME} still present, run /ce-install to remove it)`;
   } else if (legacy) {
     state = `legacy manual install (${isLink(legacy) ? "symlink" : "copy"} of ${LEGACY_NAME}), run /ce-install to switch to the auto-updated loader`;
@@ -22812,9 +22674,9 @@ function loaderStatus(ceDir) {
   return `${ceDir}: ${state}`;
 }
 function writeLoader(ceDir) {
-  const autorun = join(ceDir, "autorun");
-  writeFileSync(join(autorun, LOADER_NAME), LOADER, "utf8");
-  const done = [`wrote ${join(autorun, LOADER_NAME)}`];
+  const autorun = join2(ceDir, "autorun");
+  writeFileSync(join2(autorun, LOADER_NAME), LOADER, "utf8");
+  const done = [`wrote ${join2(autorun, LOADER_NAME)}`];
   const legacy = legacyInstall(autorun);
   if (legacy) {
     unlinkSync(legacy);
@@ -22858,7 +22720,7 @@ async function install(ceDirs, serverScript) {
       }
       try {
         await writeLoaderElevated(ceDir, serverScript);
-        lines.push(`installed with administrator rights in ${join(ceDir, "autorun")}`);
+        lines.push(`installed with administrator rights in ${join2(ceDir, "autorun")}`);
       } catch (elevated) {
         lines.push(`FAILED for ${ceDir}: ${elevated.message}`);
         continue;
@@ -22889,6 +22751,7 @@ function installState() {
 var installTools = [
   defineTool({
     name: "ce_install_plugin",
+    antiCheatExempt: true,
     description: `Install the CE-side plugin: a loader in Cheat Engine's autorun folder that runs the auto-updated plugin script. May show a Windows administrator prompt.
 
 IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., by running /ce-install). It writes into the Cheat Engine install folder.`,
@@ -22901,7 +22764,7 @@ IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., b
       if (confirm !== "USER_CONFIRMED") return "BLOCKED: Use the /ce-install command to install the CE plugin.";
       let dirs;
       if (ce_dir) {
-        if (!existsSync2(join2(ce_dir, "autorun"))) return `Error: ${ce_dir} has no autorun folder, is it a Cheat Engine install folder?`;
+        if (!existsSync3(join3(ce_dir, "autorun"))) return `Error: ${ce_dir} has no autorun folder, is it a Cheat Engine install folder?`;
         dirs = [ce_dir];
       } else {
         dirs = await findCeDirs();
@@ -22916,6 +22779,7 @@ IMPORTANT: Do NOT call this tool unless the user explicitly requests it (e.g., b
 var coreTools = [
   defineTool({
     name: "ce_status",
+    antiCheatExempt: true,
     description: "Check if Cheat Engine is connected and responding, the SAFE mode state, and whether the CE plugin is installed.",
     schema: {
       take_over: external_exports.boolean().default(false).describe("Take Cheat Engine over from another Claude Code session that is using it (only when ce_status or another tool reported it)")
@@ -22925,9 +22789,16 @@ var coreTools = [
       let connection;
       try {
         if (take_over) await ctx.scope.takeOver();
-        connection = await ctx.run(lua`
-            _mcp_str = string.format('Connected: %s - CE %s (PID: %d) [%s]', _VERSION, tostring(getCEVersion()),
-              getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`) ?? "Error: no answer from Cheat Engine";
+        const reply = await ctx.run(lua`
+            _mcp_str = string.format('%s\nConnected: %s - CE %s (PID: %d) [%s]', CEMCP and tostring(CEMCP.scriptHash) or 'none',
+              _VERSION, tostring(getCEVersion()), getOpenedProcessID() or 0, _mcp_unsafe == true and 'unsafe' or 'safe')`) ?? "";
+        const [loadedHash, ...rest] = reply.split("\n");
+        connection = rest.join("\n") || "Error: no answer from Cheat Engine";
+        if (loadedHash === "none") {
+          connection += "\nCE plugin not loaded in this Cheat Engine session (the pipe was opened another way): MCP menu and logs unavailable";
+        } else if (loadedHash !== String(pluginScriptHash())) {
+          connection += "\nCheat Engine runs an older copy of the plugin script: restart Cheat Engine to load the updated one";
+        }
       } catch (err) {
         if (!(err instanceof CEPipeError)) throw err;
         connection = `Not connected: ${err.message}`;
@@ -22937,6 +22808,7 @@ var coreTools = [
   }),
   defineTool({
     name: "ce_get_logs",
+    antiCheatExempt: true,
     description: "Get the CE plugin's log of recent MCP commands (useful for debugging).",
     schema: {
       clear: external_exports.boolean().default(false).describe("Clear the log buffer after reading")
@@ -22955,6 +22827,7 @@ var coreTools = [
   }),
   defineTool({
     name: "ce_output_more",
+    antiCheatExempt: true,
     description: `Read the rest of the previous tool's output when it ended with a "[truncated: ...]" line.
 
 Must be called right after the truncated call: calling any other tool discards it.
@@ -22970,6 +22843,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
   }),
   defineTool({
     name: "ce_safety_status",
+    antiCheatExempt: true,
     description: "Check the current safety mode: SAFE (tools that can crash the game or CE are locked) or UNSAFE.",
     schema: {},
     writes: false,
@@ -22981,6 +22855,7 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
   }),
   defineTool({
     name: "ce_safety_enable_writes",
+    antiCheatExempt: true,
     description: `Enable UNSAFE mode: allows the tools that can crash the game or CE (ce_lua, code injection, breakpoints, DLL injection, .CT table loading, Mono heap access).
 
 IMPORTANT: Do NOT call this tool unless the user explicitly requests it
@@ -22992,12 +22867,28 @@ Never enable unsafe mode proactively or without clear user consent.`,
     writes: false,
     async run({ confirm }, ctx) {
       if (confirm !== "USER_CONFIRMED") return "BLOCKED: Use the /unsafe-ce command to enable unsafe mode.";
-      await ctx.run(lua`_mcp_unsafe = true if updateMenuState then pcall(updateMenuState) end`);
-      return "UNSAFE mode enabled: crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.";
+      const text = await ctx.run(
+        lua`
+          if _mcp_unsafe == true then _mcp_str = 'UNSAFE mode is already on' return end
+          local ac = (_mcp.ac or {})[getOpenedProcessID() or 0]
+          local warning = (ac and ac ~= '') and ('\n\nANTI-CHEAT DETECTED in ' .. tostring(process) .. ': ' .. ac ..
+            '.\nUsing Cheat Engine on this game can get your account banned.') or ''
+          local answer = messageDialog('CE MCP - unlock request',
+            'Claude Code asks to unlock the tools that can crash the game or Cheat Engine: Lua, code injection, ' ..
+            'breakpoints, DLL injection (speedhack, D3D, Mono), .CT tables, Mono static and instance access.' .. warning ..
+            '\n\nAllow it until Claude Code or Cheat Engine restarts?', mtWarning, mbYes, mbNo)
+          if answer ~= mrYes then _mcp_str = 'BLOCKED: the user declined the unlock in Cheat Engine' return end
+          _mcp_unsafe = true
+          if updateMenuState then pcall(updateMenuState) end
+          _mcp_str = 'UNSAFE mode enabled (confirmed by the user in Cheat Engine): crash-prone tools are now allowed until /safe-ce, or until Claude Code or CE restarts.'`,
+        { timeoutMs: 18e4 }
+      );
+      return text ?? "Error: no answer from Cheat Engine";
     }
   }),
   defineTool({
     name: "ce_safety_disable_writes",
+    antiCheatExempt: true,
     description: "Re-enable SAFE mode: locks the tools that can crash the game or CE again.",
     schema: {},
     writes: false,
@@ -23084,7 +22975,118 @@ function listBody(collect, noun, { filter, offset, limit }) {
     _mcp_str = table.concat(out, '\n')`;
 }
 
+// src/tools/jobs.ts
+var POLL_MS = 250;
+var MAX_WAIT_MS = 10 * 6e4;
+var waitSchema = {
+  wait: external_exports.boolean().default(true).describe("Wait for the result (default). false returns a job id at once: read it later with ce_job_status")
+};
+function parseLine(line) {
+  const [status = "missing", done = "0", total = "0", ...message] = (line ?? "").split("|");
+  return { status, done: Number(done), total: Number(total), message: message.join("|") };
+}
+async function jobLine(ctx, id) {
+  return parseLine(await ctx.scope.run(lua`_mcp_str = _mcp.jobLine(${id})`));
+}
+async function takeResult(ctx, id, line) {
+  if (line.status === "error") {
+    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
+    return `Error: job ${id} failed: ${line.message}`;
+  }
+  if (line.status === "cancelled") {
+    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
+    return `Job ${id} was cancelled`;
+  }
+  const text = await ctx.scope.run(lua`local job = _mcp.jobs[${id}] _mcp_str = job and job.result _mcp.jobs[${id}] = nil`);
+  return text ?? "(no result)";
+}
+async function waitForJob(ctx, id, kind) {
+  const deadline = Date.now() + MAX_WAIT_MS;
+  for (; ; ) {
+    const line = await jobLine(ctx, id);
+    if (line.status === "missing") return `Error: job ${id} no longer exists (CE was restarted?)`;
+    if (line.status === "done" || line.status === "error" || line.status === "cancelled") return takeResult(ctx, id, line);
+    await ctx.progress(line.done, line.total || void 0, line.message || `${kind}...`);
+    if (ctx.signal.aborted) {
+      await ctx.scope.run(lua`_mcp.cancelJob(${id})`);
+      return `Job ${id} cancelled: the request was aborted`;
+    }
+    if (Date.now() > deadline) {
+      return `Job ${id} (${kind}) is still running in CE (${line.message || "no progress information"}). Call ce_job_status(job_id=${id}) later.`;
+    }
+    await ctx.scope.pause(POLL_MS);
+  }
+}
+async function runJob(ctx, kind, spec, wait) {
+  const started = await ctx.run(lua`
+    local spec = ${spec}
+    if spec then _mcp_str = tostring(_mcp.startJob(spec).id) end`);
+  const id = Number(started);
+  if (!started || !Number.isInteger(id)) return started ?? "Error: the job did not start";
+  if (!wait) return `Job ${id} started (${kind}). Call ce_job_status(job_id=${id}) to get its progress and result.`;
+  return waitForJob(ctx, id, kind);
+}
+var jobTools = [
+  defineTool({
+    name: "ce_job_status",
+    antiCheatExempt: true,
+    description: "Progress or result of a CE job started with wait=false (or one that outlived its call). Returns the result once done.",
+    schema: {
+      job_id: external_exports.number().int().min(1).describe("Job id given when the job started"),
+      wait: external_exports.boolean().default(false).describe("Wait until the job finishes")
+    },
+    writes: false,
+    async run({ job_id, wait }, ctx) {
+      const line = await jobLine(ctx, job_id);
+      if (line.status === "missing") return `Error: no job ${job_id} (finished jobs are forgotten once their result is read)`;
+      if (line.status === "running" || line.status === "finishing") {
+        if (wait) return waitForJob(ctx, job_id, `job ${job_id}`);
+        const progress = line.total ? ` ${Math.floor(100 * line.done / line.total)}%` : "";
+        return `Job ${job_id}: running${progress}${line.message ? ` - ${line.message}` : ""}`;
+      }
+      return takeResult(ctx, job_id, line);
+    }
+  }),
+  defineTool({
+    name: "ce_job_cancel",
+    antiCheatExempt: true,
+    description: "Cancel a running CE job (the user can also press Cancel in its progress window in CE).",
+    schema: {
+      job_id: external_exports.number().int().min(1).describe("Job id")
+    },
+    writes: false,
+    async run({ job_id }, ctx) {
+      const text = await ctx.run(lua`
+        local job = _mcp.cancelJob(${job_id})
+        if not job then _mcp_str = 'Error: no job ' .. ${job_id} return end
+        _mcp_str = string.format('Job %d: %s', job.id, job.cancelled and 'cancellation requested' or job.status)`);
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_job_list",
+    antiCheatExempt: true,
+    description: "List the CE jobs that are running or whose result has not been read yet.",
+    schema: {},
+    writes: false,
+    async run(_args, ctx) {
+      const text = await ctx.run(lua`
+        local lines = {}
+        for id, job in pairs(_mcp.jobs) do
+          _mcp.stepJob(job)
+          lines[#lines + 1] = string.format('%d: %s - %s%s (%ds)', id, job.kind, job.status,
+            job.total and job.total > 0 and string.format(' %d%%', math.floor(100 * job.done / job.total)) or '',
+            os.time() - job.started)
+        end
+        table.sort(lines)
+        _mcp_str = #lines > 0 and table.concat(lines, '\n') or 'No jobs'`);
+      return text ?? "No jobs";
+    }
+  })
+];
+
 // src/tools/memory.ts
+var MAX_CHANGES_LISTED = 50;
 function resolveAddress(expression, local = "addr") {
   return lua`
     local ${raw(local)} = getAddressSafe(${expression})
@@ -23146,6 +23148,7 @@ var addressDescription = "Memory address: hex like '0x12345678', symbol like 'ga
 var memoryTools = [
   defineTool({
     name: "ce_attach",
+    antiCheatExempt: true,
     description: "Attach to a process by name or PID.",
     schema: {
       process: external_exports.string().describe("Process name (e.g., 'game.exe') or PID as a decimal string")
@@ -23153,16 +23156,29 @@ var memoryTools = [
     writes: false,
     async run({ process: process3 }, ctx) {
       const target = /^\d+$/.test(process3.trim()) ? BigInt(process3.trim()) : process3;
+      const pidText = await ctx.run(lua`
+        local t = ${target}
+        local pid = type(t) == 'number' and t or getProcessIDFromProcessName(t)
+        _mcp_str = tostring(pid or 0) .. ' ' .. tostring(_mcp_unsafe == true)`);
+      const [pid, unsafe] = (pidText ?? "0 false").split(" ");
+      if (!Number(pid)) return `Error: no running process named ${process3} (see ce_list_processes)`;
+      const antiCheats = await ctx.scope.antiCheatOf(Number(pid));
+      if (antiCheats.length && unsafe !== "true") {
+        return `BLOCKED: not attached. Anti-cheat detected in ${process3}: ${antiCheats.join(", ")}. ${ANTI_CHEAT_ADVICE}`;
+      }
+      const warning = antiCheats.length ? `
+WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so the user accepted the ban risk` : "";
       const text = await ctx.run(lua`
-        openProcess(${target})
-        local pid = getOpenedProcessID() or 0
-        if pid == 0 then _mcp_str = 'Error: could not open process ' .. tostring(${target}) return end
-        _mcp_str = string.format('Attached to PID: %d (%s, %s)', pid, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
-      return text ?? "Error: no answer from Cheat Engine";
+        openProcess(${BigInt(pid)})
+        local opened = getOpenedProcessID() or 0
+        if opened ~= ${BigInt(pid)} then _mcp_str = 'Error: could not open process ' .. ${process3} return end
+        _mcp_str = string.format('Attached to PID: %d (%s, %s)', opened, tostring(process), targetIs64Bit() and 'x64' or 'x86')`);
+      return (text ?? "Error: no answer from Cheat Engine") + (text?.startsWith("Error:") ? "" : warning);
     }
   }),
   defineTool({
     name: "ce_list_processes",
+    antiCheatExempt: true,
     description: "List running processes (paginated).",
     schema: pageSchema(100),
     writes: false,
@@ -23333,42 +23349,66 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
     }
   }),
   defineTool({
-    name: "ce_aob_scan",
-    description: `Scan memory for an array of bytes pattern (paginated).
-
-The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
+    name: "ce_sample_value",
+    description: `Read a value repeatedly for a while (in the background, with a progress window) and report how it moved: first/last/min/max and every change with its time. To see what a value does while the game runs (a timer, a regenerating stat, a value that changes only on some event).`,
     schema: {
-      pattern: external_exports.string().describe("Byte pattern with wildcards, e.g. '89 45 ?? 8B 4D'"),
-      module: external_exports.string().default("").describe('Only keep results inside this module (e.g. "game.exe")'),
-      protection: external_exports.string().regex(/^[+\-*XWC]*$/).default("").describe('CE protection flags: X executable, W writable, C copy-on-write; + required, - excluded. "+X-C-W" = code only. Default: all memory'),
-      offset: pageSchema(50).offset,
-      limit: pageSchema(50).limit
+      address: external_exports.string().describe(addressDescription),
+      type: external_exports.enum(VALUE_TYPES).default("int32").describe("Data type of the value"),
+      duration_ms: external_exports.number().int().min(100).max(6e5).default(5e3).describe("How long to watch, in milliseconds"),
+      interval_ms: external_exports.number().int().min(10).max(6e4).default(100).describe("Time between two reads, in milliseconds"),
+      ...waitSchema
     },
     writes: false,
     requiresProcess: true,
-    async run({ pattern, module, protection, offset, limit }, ctx) {
-      const tokens = pattern.trim().split(/\s+/);
-      if (!tokens.every((t) => /^([0-9a-f]{2}|\?\??)$/i.test(t))) {
-        return `Error: invalid pattern "${pattern}": expected hex bytes and ?? wildcards separated by spaces`;
-      }
-      const moduleFilter = module ? lua`
-          local base = getAddressSafe(${module})
-          local size = base and getModuleSize(${module})
-          if not base or not size then _mcp_str = 'Error: module not found: ' .. ${module} return end
-          inRange = function(a) return a >= base and a < base + size end` : lua`inRange = function() return true end`;
-      const collect = lua`
-        local inRange
-        ${moduleFilter}
-        local results = AOBScan(${tokens.join(" ")}, ${protection})
-        if results then
-          for i = 0, results.Count - 1 do
-            local a = tonumber(results[i], 16)
-            if a and inRange(a) then items[#items + 1] = string.format('0x%X  %s', a, getNameFromAddress(a)) end
-          end
-          results.destroy()
-        end`;
-      const text = await ctx.run(listBody(collect, "AOB matches", { filter: "", offset, limit }), { timeoutMs: 3e5 });
-      return text ?? "No AOB matches";
+    async run({ address, type, duration_ms, interval_ms, wait }, ctx) {
+      const samples = Math.floor(duration_ms / interval_ms) + 1;
+      const isFloat = type === "float" || type === "double";
+      const { read } = isFloat ? FLOAT_TYPES[type] : INT_TYPES[type];
+      const kind = `sample ${address}`;
+      return runJob(
+        ctx,
+        kind,
+        lua`(function()
+          ${resolveAddress(address)}
+          local fmt = ${isFloat ? "%.9g" : "%d"}
+          local w = { changes = {}, unreadable = 0 }
+          return {
+            kind = ${kind}, window = true,
+            run = function(job)
+              job.total = ${samples}
+              local start = getTickCount()
+              for i = 1, ${samples} do
+                if job.cancelled then return end
+                local v = ${raw(read)}
+                if v == nil then
+                  w.unreadable = w.unreadable + 1
+                else
+                  if w.first == nil then w.first, w.min, w.max = v, v, v end
+                  if w.last ~= nil and v ~= w.last then w.changes[#w.changes + 1] = { getTickCount() - start, w.last, v } end
+                  w.min, w.max, w.last = math.min(w.min, v), math.max(w.max, v), v
+                end
+                job.done = i
+                job.message = string.format('%s: %d changes', ${kind}, #w.changes)
+                if i < ${samples} then sleep(${interval_ms}) end
+              end
+              w.elapsed = getTickCount() - start
+            end,
+            finish = function(job)
+              local head = string.format('0x%X (%s) sampled for %.1f s: %d reads, %d changes%s', addr, ${type}, (w.elapsed or 0) / 1000,
+                ${samples}, #w.changes, w.unreadable > 0 and string.format(', %d unreadable', w.unreadable) or '')
+              if w.first == nil then return head .. '\nError: the address was never readable' end
+              local out = { head, string.format('first ' .. fmt .. ', last ' .. fmt .. ', min ' .. fmt .. ', max ' .. fmt, w.first, w.last, w.min, w.max) }
+              for i = 1, math.min(#w.changes, ${MAX_CHANGES_LISTED}) do
+                local c = w.changes[i]
+                out[#out + 1] = string.format('  +%.2f s: ' .. fmt .. ' -> ' .. fmt, c[1] / 1000, c[2], c[3])
+              end
+              if #w.changes > ${MAX_CHANGES_LISTED} then out[#out + 1] = string.format('  ... %d more changes', #w.changes - ${MAX_CHANGES_LISTED}) end
+              return table.concat(out, '\n')
+            end,
+          }
+        end)()`,
+        wait
+      );
     }
   }),
   defineTool({
@@ -23455,113 +23495,6 @@ The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
   })
 ];
 
-// src/tools/jobs.ts
-var POLL_MS = 250;
-var MAX_WAIT_MS = 10 * 6e4;
-var waitSchema = {
-  wait: external_exports.boolean().default(true).describe("Wait for the result (default). false returns a job id at once: read it later with ce_job_status")
-};
-function parseLine(line) {
-  const [status = "missing", done = "0", total = "0", ...message] = (line ?? "").split("|");
-  return { status, done: Number(done), total: Number(total), message: message.join("|") };
-}
-async function jobLine(ctx, id) {
-  return parseLine(await ctx.scope.run(lua`_mcp_str = _mcp.jobLine(${id})`));
-}
-async function takeResult(ctx, id, line) {
-  if (line.status === "error") {
-    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
-    return `Error: job ${id} failed: ${line.message}`;
-  }
-  if (line.status === "cancelled") {
-    await ctx.scope.run(lua`_mcp.jobs[${id}] = nil`);
-    return `Job ${id} was cancelled`;
-  }
-  const text = await ctx.scope.run(lua`local job = _mcp.jobs[${id}] _mcp_str = job and job.result _mcp.jobs[${id}] = nil`);
-  return text ?? "(no result)";
-}
-async function waitForJob(ctx, id, kind) {
-  const deadline = Date.now() + MAX_WAIT_MS;
-  for (; ; ) {
-    const line = await jobLine(ctx, id);
-    if (line.status === "missing") return `Error: job ${id} no longer exists (CE was restarted?)`;
-    if (line.status === "done" || line.status === "error" || line.status === "cancelled") return takeResult(ctx, id, line);
-    await ctx.progress(line.done, line.total || void 0, line.message || `${kind}...`);
-    if (ctx.signal.aborted) {
-      await ctx.scope.run(lua`_mcp.cancelJob(${id})`);
-      return `Job ${id} cancelled: the request was aborted`;
-    }
-    if (Date.now() > deadline) {
-      return `Job ${id} (${kind}) is still running in CE (${line.message || "no progress information"}). Call ce_job_status(job_id=${id}) later.`;
-    }
-    await ctx.scope.pause(POLL_MS);
-  }
-}
-async function runJob(ctx, kind, spec, wait) {
-  const started = await ctx.run(lua`
-    local spec = ${spec}
-    if spec then _mcp_str = tostring(_mcp.startJob(spec).id) end`);
-  const id = Number(started);
-  if (!started || !Number.isInteger(id)) return started ?? "Error: the job did not start";
-  if (!wait) return `Job ${id} started (${kind}). Call ce_job_status(job_id=${id}) to get its progress and result.`;
-  return waitForJob(ctx, id, kind);
-}
-var jobTools = [
-  defineTool({
-    name: "ce_job_status",
-    description: "Progress or result of a CE job started with wait=false (or one that outlived its call). Returns the result once done.",
-    schema: {
-      job_id: external_exports.number().int().min(1).describe("Job id given when the job started"),
-      wait: external_exports.boolean().default(false).describe("Wait until the job finishes")
-    },
-    writes: false,
-    async run({ job_id, wait }, ctx) {
-      const line = await jobLine(ctx, job_id);
-      if (line.status === "missing") return `Error: no job ${job_id} (finished jobs are forgotten once their result is read)`;
-      if (line.status === "running" || line.status === "finishing") {
-        if (wait) return waitForJob(ctx, job_id, `job ${job_id}`);
-        const progress = line.total ? ` ${Math.floor(100 * line.done / line.total)}%` : "";
-        return `Job ${job_id}: running${progress}${line.message ? ` - ${line.message}` : ""}`;
-      }
-      return takeResult(ctx, job_id, line);
-    }
-  }),
-  defineTool({
-    name: "ce_job_cancel",
-    description: "Cancel a running CE job (the user can also press Cancel in its progress window in CE).",
-    schema: {
-      job_id: external_exports.number().int().min(1).describe("Job id")
-    },
-    writes: false,
-    async run({ job_id }, ctx) {
-      const text = await ctx.run(lua`
-        local job = _mcp.cancelJob(${job_id})
-        if not job then _mcp_str = 'Error: no job ' .. ${job_id} return end
-        _mcp_str = string.format('Job %d: %s', job.id, job.cancelled and 'cancellation requested' or job.status)`);
-      return text ?? "Error: no answer from Cheat Engine";
-    }
-  }),
-  defineTool({
-    name: "ce_job_list",
-    description: "List the CE jobs that are running or whose result has not been read yet.",
-    schema: {},
-    writes: false,
-    async run(_args, ctx) {
-      const text = await ctx.run(lua`
-        local lines = {}
-        for id, job in pairs(_mcp.jobs) do
-          _mcp.stepJob(job)
-          lines[#lines + 1] = string.format('%d: %s - %s%s (%ds)', id, job.kind, job.status,
-            job.total and job.total > 0 and string.format(' %d%%', math.floor(100 * job.done / job.total)) or '',
-            os.time() - job.started)
-        end
-        table.sort(lines)
-        _mcp_str = #lines > 0 and table.concat(lines, '\n') or 'No jobs'`);
-      return text ?? "No jobs";
-    }
-  })
-];
-
 // src/tools/scan.ts
 var VAR_TYPES = {
   byte: "vtByte",
@@ -23633,6 +23566,35 @@ function scanJob(kind, name, first, summary) {
     end,
   }`;
 }
+function firstScan(spec) {
+  const pref = { yes: "scanInclude", no: "scanExclude", any: "scanDontCare" };
+  const aligned = spec.alignment > 1;
+  return lua`(function()
+    if _mcp.scans[${spec.name}] and not _mcp.scans[${spec.name}].ready then
+      _mcp_str = 'Error: scan ' .. ${spec.name} .. ' is still running (see ce_job_list)' return
+    end
+    local MAX_ADDRESS = targetIs64Bit() and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF
+    ${spec.range}
+    _mcp.dropScan(${spec.name})
+    local ms = createMemScan()
+    ms.VarType = ${spec.varType}
+    ms.ScanOption = ${spec.option}
+    ms.Scanvalue1 = ${spec.value}
+    ms.Scanvalue2 = ${spec.value2}
+    ms.Hexadecimal = ${spec.hexadecimal}
+    ms.Startaddress = start
+    ms.Stopaddress = stop
+    ms.ScanWritable = ${pref[spec.memory.writable]}
+    ms.ScanExecutable = ${pref[spec.memory.executable]}
+    ms.ScanCopyOnWrite = ${pref[spec.memory.copy_on_write]}
+    ms.Fastscanmethod = ${aligned ? "fsmAligned" : "fsmNotAligned"}
+    ms.Fastscanparameter = ${String(aligned ? spec.alignment : 1)}
+    local s = { ms = ms, ready = false }
+    _mcp.scans[${spec.name}] = s
+    ms.firstScan()
+    return ${scanJob(spec.kind, spec.name, true, lua`${spec.summary}`)}
+  end)()`;
+}
 var scanTools = [
   defineTool({
     name: "ce_scan_value",
@@ -23669,41 +23631,78 @@ ERROR HANDLING:
       const { value, value_type, scan_type, value2, hexadecimal, start_address, stop_address, scan_name, wait } = args;
       if (!NO_VALUE.has(scan_type) && !value.trim()) return `Error: scan_type '${scan_type}' needs a value`;
       if (scan_type === "between" && !value2.trim()) return "Error: scan_type 'between' needs value2";
-      const pref = { yes: "scanInclude", no: "scanExclude", any: "scanDontCare" };
-      const aligned = args.alignment > 1;
+      const range = lua`
+        local function addressOf(text, default)
+          if text == '' then return default end
+          local a = getAddressSafe(text)
+          if not a then error('invalid address: ' .. text, 0) end
+          return a
+        end
+        local start, stop = addressOf(${start_address}, 0), addressOf(${stop_address}, MAX_ADDRESS)`;
       const kind = `${scan_type} ${value_type} scan`;
       return runJob(
         ctx,
         kind,
-        lua`(function()
-          if _mcp.scans[${scan_name}] and not _mcp.scans[${scan_name}].ready then
-            _mcp_str = 'Error: scan ' .. ${scan_name} .. ' is still running (see ce_job_list)' return
-          end
-          _mcp.dropScan(${scan_name})
-          local function addressOf(text, default)
-            if text == '' then return default end
-            local a = getAddressSafe(text)
-            if not a then error('invalid address: ' .. text, 0) end
-            return a
-          end
-          local ms = createMemScan()
-          ms.VarType = ${VAR_TYPES[value_type]}
-          ms.ScanOption = ${FIRST_SCAN_TYPES[scan_type]}
-          ms.Scanvalue1 = ${value}
-          ms.Scanvalue2 = ${value2}
-          ms.Hexadecimal = ${hexadecimal}
-          ms.Startaddress = addressOf(${start_address}, 0)
-          ms.Stopaddress = addressOf(${stop_address}, targetIs64Bit() and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF)
-          ms.ScanWritable = ${pref[args.writable]}
-          ms.ScanExecutable = ${pref[args.executable]}
-          ms.ScanCopyOnWrite = ${pref[args.copy_on_write]}
-          ms.Fastscanmethod = ${aligned ? "fsmAligned" : "fsmNotAligned"}
-          ms.Fastscanparameter = ${String(aligned ? args.alignment : 1)}
-          local s = { ms = ms, ready = false }
-          _mcp.scans[${scan_name}] = s
-          ms.firstScan()
-          return ${scanJob(kind, scan_name, true, lua`${`Scan "${scan_name}" complete (${scan_type}, ${value_type}): %d results`}`)}
-        end)()`,
+        firstScan({
+          name: scan_name,
+          kind,
+          range,
+          varType: VAR_TYPES[value_type],
+          option: FIRST_SCAN_TYPES[scan_type],
+          value,
+          value2,
+          hexadecimal,
+          memory: args,
+          alignment: args.alignment,
+          summary: `Scan "${scan_name}" complete (${scan_type}, ${value_type}): %d results`
+        }),
+        wait
+      );
+    }
+  }),
+  defineTool({
+    name: "ce_aob_scan",
+    description: `Scan memory for an array of bytes pattern, in the background (CE shows its progress). Up to 10 matches are listed directly; the matches stay a named scan: page through them with ce_scan_results(scan_name="aob").
+
+The pattern is hex bytes with ?? (or ?) wildcards, e.g. '89 45 ?? 8B 4D'.`,
+    schema: {
+      pattern: external_exports.string().describe("Byte pattern with wildcards, e.g. '89 45 ?? 8B 4D'"),
+      module: external_exports.string().default("").describe('Only scan this module (e.g. "game.exe"); default: all memory'),
+      writable: external_exports.enum(["yes", "no", "any"]).default("any").describe("Writable memory"),
+      executable: external_exports.enum(["yes", "no", "any"]).default("any").describe('Executable memory ("yes" with writable "no" = code only)'),
+      copy_on_write: external_exports.enum(["yes", "no", "any"]).default("any").describe("Copy-on-write memory"),
+      scan_name: scanName.default("aob"),
+      ...waitSchema
+    },
+    writes: false,
+    requiresProcess: true,
+    async run({ pattern, module, scan_name, wait, ...memory }, ctx) {
+      const tokens = pattern.trim().split(/\s+/);
+      if (!tokens.every((t) => /^([0-9a-f]{2}|\?\??)$/i.test(t))) {
+        return `Error: invalid pattern "${pattern}": expected hex bytes and ?? wildcards separated by spaces`;
+      }
+      const range = module ? lua`
+          local start = getAddressSafe(${module})
+          local size = start and getModuleSize(${module})
+          if not start or not size then _mcp_str = 'Error: module not found: ' .. ${module} return end
+          local stop = start + size` : lua`local start, stop = 0, MAX_ADDRESS`;
+      const kind = "AOB scan";
+      return runJob(
+        ctx,
+        kind,
+        firstScan({
+          name: scan_name,
+          kind,
+          range,
+          varType: "vtByteArray",
+          option: "soExactValue",
+          value: tokens.map((t) => t.startsWith("?") ? "??" : t.toUpperCase()).join(" "),
+          value2: "",
+          hexadecimal: true,
+          memory,
+          alignment: 1,
+          summary: `AOB scan "${scan_name}"${module ? ` in ${module}` : ""} complete: %d matches`
+        }),
         wait
       );
     }
@@ -23777,6 +23776,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
   }),
   defineTool({
     name: "ce_scan_reset",
+    antiCheatExempt: true,
     description: "Discard a scan and its results (frees the memory and files CE keeps for it).",
     schema: { scan_name: scanName },
     writes: false,
@@ -23790,6 +23790,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
   }),
   defineTool({
     name: "ce_scan_list",
+    antiCheatExempt: true,
     description: "List the scans kept by the server, with their result counts.",
     schema: {},
     writes: false,
@@ -23884,7 +23885,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 ];
 
 // src/tools/table.ts
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
 import { isAbsolute, resolve } from "path";
 var RECORD_VAR_TYPES = {
   byte: "vtByte",
@@ -24094,6 +24095,7 @@ Either an existing record (record) or an address (a new record is created). The 
   }),
   defineTool({
     name: "ce_unfreeze",
+    antiCheatExempt: true,
     description: "Unfreeze a record (or every frozen value when no record is given). Scripts are left as they are.",
     schema: { record: recordId.optional() },
     writes: false,
@@ -24229,11 +24231,11 @@ When disable_bytes is omitted, the bytes currently at the address are read and u
         if not ok then _mcp_str = 'Error: cannot save ' .. ${path} .. ': ' .. tostring(err) return end
         _mcp_str = al.Count .. '|' .. table.concat(active, ',')`);
       if (!text || text.startsWith("Error:")) return text ?? "Error: no answer from Cheat Engine";
-      if (!existsSync3(path)) return `Error: CE reported success but ${path} does not exist`;
+      if (!existsSync4(path)) return `Error: CE reported success but ${path} does not exist`;
       const [count, activeList] = text.split("|");
       if (!save_active_states || !activeList) return `Table saved to ${path} (${count} entries)`;
       const active = new Set(activeList.split(","));
-      const xml = readFileSync2(path, "utf8").replace(
+      const xml = readFileSync3(path, "utf8").replace(
         /<ID>(\d+)<\/ID>/g,
         (match, id) => active.has(id) ? `${match}
       <Active>1</Active>` : match
@@ -24254,7 +24256,7 @@ When disable_bytes is omitted, the bytes currently at the address are read and u
     dangerous: true,
     async run({ filename, directory, merge: merge2 }, ctx) {
       const path = tablePath(filename, directory);
-      if (!existsSync3(path)) return `Error: no such file: ${path}`;
+      if (!existsSync4(path)) return `Error: no such file: ${path}`;
       const text = await ctx.run(lua`
         local ok, err = pcall(loadTable, ${path}, ${merge2})
         if not ok then _mcp_str = 'Error: cannot load ' .. ${path} .. ': ' .. tostring(err) return end
@@ -24329,6 +24331,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
   }),
   defineTool({
     name: "ce_breakpoint_results",
+    antiCheatExempt: true,
     description: "Instructions that triggered a watchpoint, with hit counts, registers at the first hit and the function range.",
     schema: {
       id: watchId.optional().describe("Watchpoint ID (default: every watchpoint)")
@@ -24358,6 +24361,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
   }),
   defineTool({
     name: "ce_breakpoint_remove",
+    antiCheatExempt: true,
     description: "Remove a watchpoint (its results stay readable until removed again), or every watchpoint.",
     schema: {
       id: watchId.optional().describe("Watchpoint ID (default: all of them)"),
@@ -24525,24 +24529,38 @@ var MONO_HELPERS = raw(`
     return nil, 'class ' .. full .. ' not found in ' .. asm
   end
   local function fieldsOf(klass) return mono_class_enumFields(klass, true) or {} end
-  local function readValue(address, field)
-    -- References as 0x pointers (CE's readers give bare hex, sometimes zero-padded)
-    if REF_TYPES[field.monotype] or field.monotype == 0x18 then
-      local p = readPointer(address)
-      return p and string.format('0x%X', p) or '??'
-    end
-    local reader = getDotNetValueReader and getDotNetValueReader(field.monotype)
-    if reader then
-      local ok, v = pcall(reader, address, field)
-      if ok and v ~= nil then return tostring(v) end
-    end
-    local p = readPointer(address)
-    return p and string.format('0x%X', p) or '??'
+  local function shortType(typename) return ((typename or ''):gsub('^System%.', '')) end
+  -- Primitive types: memory format (little endian)
+  local FORMATS = { Boolean = '<I1', Byte = '<I1', SByte = '<i1', Int16 = '<i2', UInt16 = '<I2', Char = '<I2', Int32 = '<i4',
+    UInt32 = '<I4', Int64 = '<i8', UInt64 = '<I8', Single = '<f', Double = '<d' }
+  -- Raw integer of a primitive type's memory (zero-extended, as the IL2CPP collector returns it)
+  local function readRaw(address, size)
+    local b = readBytes(address, size, true)
+    if not b then return nil end
+    return (string.unpack('<i8', string.char(table.unpack(b)) .. string.rep('\\0', 8 - size)))
   end
-  -- A static field's value. Mono: the class's static data address + the field offset, read from
-  -- memory. IL2CPP: the collector gives no static data address, so it reads each field (8 raw bytes)
+  -- A primitive value given as text, packed in its memory format, or nil and why
+  local function packValue(text, typename)
+    local t = shortType(typename)
+    local fmt = FORMATS[t]
+    if not fmt then return nil, 'only primitive fields (numbers, booleans) can be written, not ' .. tostring(typename) end
+    local v
+    if t == 'Boolean' then
+      local l = text:lower()
+      v = (l == 'true' or l == '1') and 1 or (l == 'false' or l == '0') and 0 or nil
+    elseif t == 'Single' or t == 'Double' then
+      v = tonumber(text)
+    else
+      v = math.tointeger(tonumber(text))
+    end
+    if v == nil then return nil, string.format('%s is not a valid %s', text, t) end
+    local ok, packed = pcall(string.pack, fmt, v)
+    if not ok then return nil, string.format('%s does not fit in a %s', text, t) end
+    return packed
+  end
+  -- A raw integer (8 bytes, little endian) formatted as the given primitive type
   local function rawValue(v, typename)
-    local t = (typename or ''):gsub('^System%.', '')
+    local t = shortType(typename)
     if v == nil then return '??' end
     if t == 'Boolean' then return tostring(v & 0xFF ~= 0) end
     if t == 'Byte' then return tostring(v & 0xFF) end
@@ -24557,18 +24575,124 @@ var MONO_HELPERS = raw(`
     if t == 'Double' then return string.format('%.17g', string.unpack('<d', string.pack('<i8', v))) end
     return string.format('0x%X', v)
   end
+  -- ACTk obscured values (CodeStage.AntiCheat.ObscuredTypes.Obscured<Kind>): a struct whose
+  -- hiddenValue is the value XOR currentCryptoKey. While ACTk's ObscuredCheatingDetector runs,
+  -- fakeValue holds the plain value as a honeypot and a read that differs from it is reported as
+  -- cheating: it is checked (it proves the decoding) and written together with hiddenValue.
+  local OBSCURED = { Int = 'Int32', UInt = 'UInt32', Short = 'Int16', UShort = 'UInt16', Byte = 'Byte', SByte = 'SByte',
+    Long = 'Int64', ULong = 'UInt64', Char = 'Char', Float = 'Single', Double = 'Double' }
+  local function obscuredOf(field)
+    local kind = (field.typename or ''):match('ObscuredTypes%.Obscured(%a+)$')
+    if not kind then return nil end
+    local o = { kind = kind, plain = OBSCURED[kind], parts = {} }
+    -- The struct's field offsets count the object header of its boxed form
+    local header = targetIs64Bit() and 0x10 or 8
+    for _, f in ipairs(fieldsOf(mono_field_getClass(field.field))) do
+      local fmt = FORMATS[shortType(f.typename)]
+      if not f.isStatic and fmt then o.parts[f.name] = { offset = f.offset - header, typename = f.typename, size = string.packsize(fmt) } end
+    end
+    if not (o.plain and o.parts.hiddenValue and o.parts.currentCryptoKey) then o.why = 'ACTk Obscured' .. kind .. ': unsupported type or layout' end
+    return o
+  end
+  local function partRaw(address, part) return readRaw(address + part.offset, part.size) end
+  -- Decoded value of the obscured struct at address, and whether its honeypot confirmed it; nil and why
+  local function obscuredRead(address, o)
+    if o.why then return nil, o.why end
+    local p = o.parts
+    if p.inited and partRaw(address, p.inited) == 0 then return nil, 'ACTk Obscured' .. o.kind .. ': not initialized yet' end
+    local hidden, key = partRaw(address, p.hiddenValue), partRaw(address, p.currentCryptoKey)
+    if not hidden or not key then return nil, 'unreadable' end
+    local value = rawValue(hidden ~ key, o.plain)
+    if not (p.fakeValue and p.fakeValueActive and partRaw(address, p.fakeValueActive) ~= 0) then return value, false end
+    local fake = rawValue(partRaw(address, p.fakeValue), p.fakeValue.typename)
+    local a, b = tonumber(value), tonumber(fake)
+    if fake == value or (a and b and math.abs(a - b) < 1e-4) then return value, true end
+    return nil, string.format('ACTk Obscured%s: XOR decoding gives %s but its honeypot holds %s (unknown encoding)', o.kind, value, fake)
+  end
+  local function readValue(address, field)
+    local o = obscuredOf(field)
+    if o then
+      local v, checked = obscuredRead(address, o)
+      if not v then return '?? (' .. checked .. ')' end
+      return string.format('%s (ACTk Obscured%s%s)', v, o.kind, checked and ', checked against its honeypot' or '')
+    end
+    -- References as 0x pointers (CE's readers give bare hex, sometimes zero-padded)
+    if REF_TYPES[field.monotype] or field.monotype == 0x18 then
+      local p = readPointer(address)
+      return p and string.format('0x%X', p) or '??'
+    end
+    local reader = getDotNetValueReader and getDotNetValueReader(field.monotype)
+    if reader then
+      local ok, v = pcall(reader, address, field)
+      if ok and v ~= nil then return tostring(v) end
+    end
+    local p = readPointer(address)
+    return p and string.format('0x%X', p) or '??'
+  end
+  -- Write a value given as text (primitive or obscured) at address; nil, or why it was not written
+  local function writeValue(address, field, text)
+    local o = obscuredOf(field)
+    if not o then
+      local packed, why = packValue(text, field.typename)
+      if not packed then return why end
+      if not writeBytes(address, { packed:byte(1, -1) }) then return string.format('write failed at 0x%X', address) end
+      return nil
+    end
+    local current, checked = obscuredRead(address, o)
+    if not current then return checked end
+    if not checked and (o.plain == 'Single' or o.plain == 'Double') then
+      return 'ACTk Obscured' .. o.kind .. ': its encoding is only trusted once checked against its honeypot, inactive here (ACTk detector not running): not written'
+    end
+    local packed, why = packValue(text, o.plain)
+    if not packed then return why end
+    local p = o.parts
+    local plain = string.unpack('<i8', packed .. string.rep('\\0', 8 - #packed))
+    local changes = { { p.hiddenValue, string.pack('<i8', plain ~ partRaw(address, p.currentCryptoKey)):sub(1, p.hiddenValue.size) } }
+    if p.fakeValue then
+      local fake, why = packValue(text, p.fakeValue.typename)
+      if not fake then return why end
+      changes[2] = { p.fakeValue, fake }
+    end
+    -- One write for both, so that the game never reads a hidden value and a honeypot that differ
+    local first, last = math.huge, 0
+    for _, c in ipairs(changes) do first, last = math.min(first, c[1].offset), math.max(last, c[1].offset + c[1].size) end
+    local bytes = readBytes(address + first, last - first, true)
+    if not bytes then return string.format('cannot read 0x%X', address + first) end
+    for _, c in ipairs(changes) do
+      for i = 1, c[1].size do bytes[c[1].offset - first + i] = c[2]:byte(i) end
+    end
+    if not writeBytes(address + first, bytes) then return string.format('write failed at 0x%X', address + first) end
+    return nil
+  end
+  -- A static field's value. Mono: the class's static data address + the field offset, read from
+  -- memory. IL2CPP: the collector gives no static data address; it reads a field into 8 bytes
   local staticBase
-  local function staticValue(klass, field)
-    if mono_isil2cpp() then return rawValue(mono_getStaticFieldValue(klass, field.field), field.typename) end
+  local function staticAddress(klass, field)
     if staticBase == nil then staticBase = mono_class_getStaticFieldAddress(0, klass) or false end
-    if not staticBase then return '?? (no static data: class not initialized yet?)' end
-    return readValue(staticBase + field.offset, field)
+    return staticBase and staticBase + field.offset or nil
+  end
+  local function il2cppStaticFits(field) return FORMATS[shortType(field.typename)] or REF_TYPES[field.monotype] or field.monotype == 0x18 end
+  local function staticValue(klass, field)
+    if mono_isil2cpp() then
+      -- A larger value (a struct) would overflow the collector's 8 bytes inside the game
+      if not il2cppStaticFits(field) then return '?? (IL2CPP: only number, boolean and reference static fields are readable)' end
+      return rawValue(mono_getStaticFieldValue(klass, field.field), field.typename)
+    end
+    local address = staticAddress(klass, field)
+    if not address then return '?? (no static data: class not initialized yet?)' end
+    return readValue(address, field)
   end
 `);
 function classLookup(className, assembly) {
   return lua`
     local klass, why = findClass(${className}, ${assembly})
     if not klass then _mcp_str = 'Error: ' .. why return end`;
+}
+function fieldLookup(fieldName, className) {
+  return lua`
+    local field
+    for _, f in ipairs(fieldsOf(klass)) do if f.name == ${fieldName} then field = f end end
+    if not field then _mcp_str = 'Error: no field ' .. ${fieldName} .. ' in ' .. ${className} .. ' (see ce_mono_fields)' return end`;
 }
 var monoTools = [
   defineTool({
@@ -24688,9 +24812,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
         lua`
           ${MONO_HELPERS}
           ${classLookup(class_name, assembly)}
-          local field
-          for _, f in ipairs(fieldsOf(klass)) do if f.name == ${field_name} then field = f end end
-          if not field then _mcp_str = 'Error: no field ' .. ${field_name} .. ' in ' .. ${class_name} .. ' (see ce_mono_fields)' return end
+          ${fieldLookup(field_name, class_name)}
           if field.isStatic then
             _mcp_str = string.format('%s.%s (%s, static) = %s', ${class_name}, field.name, field.typename or '?', staticValue(klass, field))
             return
@@ -24700,6 +24822,53 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
           if not base then _mcp_str = 'Error: invalid address: ' .. ${instance_address} return end
           local address = base + field.offset
           _mcp_str = string.format('%s.%s (%s) at 0x%X = %s', ${class_name}, field.name, field.typename or '?', address, readValue(address, field))`,
+        { timeoutMs: 6e4 }
+      );
+      return text ?? "Error: no answer from Cheat Engine";
+    }
+  }),
+  defineTool({
+    name: "ce_mono_write_field",
+    description: `Write a field of an object (instance_address) or a static field by name, in its real .NET type: numbers and booleans, and ACTk obscured values (ObscuredInt, ObscuredFloat...) re-encrypted with their key, their honeypot kept equal so ACTk's detector sees nothing. Reports the value before and after.`,
+    schema: {
+      class_name: classArg,
+      field_name: external_exports.string().describe("Field name"),
+      value: external_exports.string().describe('New value, e.g. "100", "-2", "0x10", "2.5", "true"'),
+      instance_address: external_exports.string().default("").describe("Object address (not needed for a static field)"),
+      assembly: assemblyArg
+    },
+    writes: true,
+    requiresProcess: true,
+    dangerous: ({ instance_address }) => instance_address === "",
+    async run({ class_name, field_name, value, instance_address, assembly }, ctx) {
+      const text = await ctx.run(
+        lua`
+          ${MONO_HELPERS}
+          ${classLookup(class_name, assembly)}
+          ${fieldLookup(field_name, class_name)}
+          if field.isConst then _mcp_str = 'Error: ' .. field.name .. ' is a constant (compiled into the code, not in memory)' return end
+          local address
+          if field.isStatic then
+            if mono_isil2cpp() then
+              local packed, why = packValue(${value}, field.typename)
+              if not packed then _mcp_str = 'Error: IL2CPP static field: ' .. why return end
+              local before = staticValue(klass, field)
+              mono_setStaticFieldValue(klass, field.field, (string.unpack('<i8', packed .. string.rep('\0', 8 - #packed))))
+              _mcp_str = string.format('%s.%s (%s, static): %s -> %s', ${class_name}, field.name, field.typename or '?', before, staticValue(klass, field))
+              return
+            end
+            address = staticAddress(klass, field)
+            if not address then _mcp_str = 'Error: no static data for ' .. ${class_name} .. ' (class not initialized yet?)' return end
+          else
+            if ${instance_address} == '' then _mcp_str = 'Error: ' .. field.name .. ' is an instance field: give instance_address' return end
+            local base = getAddressSafe(${instance_address})
+            if not base then _mcp_str = 'Error: invalid address: ' .. ${instance_address} return end
+            address = base + field.offset
+          end
+          local before = readValue(address, field)
+          local why = writeValue(address, field, ${value})
+          if why then _mcp_str = 'Error: ' .. why return end
+          _mcp_str = string.format('%s.%s (%s) at 0x%X: %s -> %s', ${class_name}, field.name, field.typename or '?', address, before, readValue(address, field))`,
         { timeoutMs: 6e4 }
       );
       return text ?? "Error: no answer from Cheat Engine";
@@ -24861,25 +25030,38 @@ import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 
 // src/capture.ts
 import { execFile as execFile2 } from "child_process";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 var CAPTURE_TIMEOUT_MS = 3e4;
 function powershellPath2() {
-  return join3(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return join4(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
-function script(pid, maxWidth) {
+function regionScript({ x, y, width, height }, areaName) {
+  return `if (${x} -ge $width -or ${y} -ge $height) { throw "the region starts outside the ${areaName} ($($width)x$($height))" }
+$x0 += ${x}; $y0 += ${y}
+$width = [Math]::Min(${width}, $width - ${x}); $height = [Math]::Min(${height}, $height - ${y})`;
+}
+function script(pid, { maxWidth, clientOnly, region }) {
   return `
 $ErrorActionPreference = 'Stop'
+# With stderr redirected, PowerShell writes its errors there as CLIXML: report them on stdout instead
+trap { [Console]::Out.Write('ERROR ' + $_.Exception.Message); exit 1 }
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class CemcpWin {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
 }
 '@
+# Real pixels: without it, a scaled display (125%, 150%) gives virtualized sizes and a cut image
+[void][CemcpWin]::SetProcessDPIAware()
 $process = Get-Process -Id ${pid}
 $hwnd = $process.MainWindowHandle
 if ($hwnd -eq [IntPtr]::Zero) { throw 'the process has no main window' }
@@ -24896,6 +25078,27 @@ $ok = [CemcpWin]::PrintWindow($hwnd, $hdc, 2)
 $graphics.ReleaseHdc($hdc)
 $graphics.Dispose()
 if (-not $ok) { throw 'PrintWindow failed' }
+# Area kept: the client area (position inside the window image) or the whole window, then the region
+$x0 = 0; $y0 = 0; $areaWidth = $width; $areaHeight = $height
+if (${clientOnly ? "$true" : "$false"}) {
+  $client = New-Object CemcpWin+RECT
+  [void][CemcpWin]::GetClientRect($hwnd, [ref]$client)
+  $origin = New-Object CemcpWin+POINT
+  [void][CemcpWin]::ClientToScreen($hwnd, [ref]$origin)
+  $x0 = $origin.X - $rect.Left; $y0 = $origin.Y - $rect.Top
+  $areaWidth = $client.Right; $areaHeight = $client.Bottom
+  if ($areaWidth -le 0 -or $areaHeight -le 0) { throw 'the window has no client area' }
+}
+$width = $areaWidth; $height = $areaHeight
+${region ? regionScript(region, clientOnly ? "client area" : "window") : ""}
+if ($x0 -ne 0 -or $y0 -ne 0 -or $width -ne $bitmap.Width -or $height -ne $bitmap.Height) {
+  $cropped = New-Object System.Drawing.Bitmap $width, $height
+  $g = [System.Drawing.Graphics]::FromImage($cropped)
+  $g.DrawImage($bitmap, (New-Object System.Drawing.Rectangle 0, 0, $width, $height), (New-Object System.Drawing.Rectangle $x0, $y0, $width, $height), [System.Drawing.GraphicsUnit]::Pixel)
+  $g.Dispose()
+  $bitmap.Dispose()
+  $bitmap = $cropped
+}
 if ($width -gt ${maxWidth}) {
   $scaledHeight = [int][Math]::Round($height * ${maxWidth} / $width)
   $scaled = New-Object System.Drawing.Bitmap ${maxWidth}, $scaledHeight
@@ -24911,9 +25114,9 @@ $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
 [Console]::Out.Write("$($width)x$($height) $($bitmap.Width)x$($bitmap.Height) " + [Convert]::ToBase64String($stream.ToArray()))
 `;
 }
-function captureWindow(pid, maxWidth) {
+function captureWindow(pid, options) {
   if (process.platform !== "win32") return Promise.reject(new Error("screenshots are only supported on Windows"));
-  const encoded = Buffer.from(script(pid, maxWidth), "utf16le").toString("base64");
+  const encoded = Buffer.from(script(pid, options), "utf16le").toString("base64");
   return new Promise((resolve3, reject) => {
     execFile2(
       powershellPath2(),
@@ -24921,7 +25124,7 @@ function captureWindow(pid, maxWidth) {
       { timeout: CAPTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
-          const reason = stderr.split(/\r?\n/).find((line) => line.trim() && !line.startsWith("At line")) ?? err.message;
+          const reason = /^ERROR (.*)$/s.exec(stdout.trim())?.[1] ?? (stderr.trim() || err.message);
           reject(new Error(`screenshot failed: ${reason.trim()}`));
           return;
         }
@@ -24931,7 +25134,7 @@ function captureWindow(pid, maxWidth) {
           return;
         }
         resolve3({
-          window: { width: Number(match[1]), height: Number(match[2]) },
+          area: { width: Number(match[1]), height: Number(match[2]) },
           image: { width: Number(match[3]), height: Number(match[4]) },
           png: Buffer.from(match[5], "base64")
         });
@@ -25023,6 +25226,7 @@ Note: ${unsupported.length} character(s) outside ASCII 32-126 are not drawn`;
   }),
   defineTool({
     name: "ce_d3d_overlay_remove",
+    antiCheatExempt: true,
     description: "Remove a text overlay (or all of them).",
     schema: { id: overlayId.optional().describe("Overlay name (default: all overlays)") },
     writes: false,
@@ -25045,22 +25249,30 @@ Note: ${unsupported.length} character(s) outside ASCII 32-126 are not drawn`;
   }),
   defineTool({
     name: "ce_screenshot",
+    antiCheatExempt: true,
     description: `Look at the game: a screenshot of the attached process's window, returned as an image (any graphics API; the window must not be minimized).
 
-By default nothing is written to disk. Give save_path to also keep the PNG file.`,
+By default only the client area (the game's picture, without title bar and borders) is captured and nothing is written to disk. A region zooms on a part of it at full resolution (read small text, a HUD value). Give save_path to also keep the PNG file.`,
     schema: {
-      max_width: external_exports.number().int().min(320).max(3840).default(1280).describe("Scale the image down to this width (smaller costs less context)"),
+      max_width: external_exports.number().int().min(64).max(3840).default(1280).describe("Scale the image down to this width (smaller costs less context)"),
+      client_only: external_exports.boolean().default(true).describe("Only the client area; false = the whole window with its frame"),
+      region: external_exports.object({
+        x: external_exports.number().int().min(0),
+        y: external_exports.number().int().min(0),
+        width: external_exports.number().int().min(1),
+        height: external_exports.number().int().min(1)
+      }).optional().describe("Part to keep, in pixels from the top-left of the client area (or of the window); clipped to it"),
       save_path: external_exports.string().default("").describe("Also write the PNG to this file (absolute, or relative to the server working directory)")
     },
     writes: ({ save_path }) => save_path !== "",
     requiresProcess: true,
-    async run({ max_width, save_path }, ctx) {
+    async run({ max_width, client_only, region, save_path }, ctx) {
       const pidText = await ctx.run(lua`_mcp_str = tostring(getOpenedProcessID())`);
       const pid = Number(pidText);
       if (!Number.isInteger(pid) || pid <= 0) return pidText ?? "Error: no process attached";
       let capture;
       try {
-        capture = await captureWindow(pid, max_width);
+        capture = await captureWindow(pid, { maxWidth: max_width, clientOnly: client_only, region });
       } catch (err) {
         return `Error: ${err.message}`;
       }
@@ -25070,9 +25282,11 @@ By default nothing is written to disk. Give save_path to also keep the PNG file.
         writeFileSync3(path, capture.png);
         saved = `, saved to ${path}`;
       }
-      const size = capture.image.width === capture.window.width ? `${capture.window.width}x${capture.window.height}` : `${capture.window.width}x${capture.window.height} window, scaled to ${capture.image.width}x${capture.image.height}`;
+      const area = client_only ? "client area" : "window";
+      const what = region ? `region (${region.x}, ${region.y}) of the ${area}: ` : `${area} `;
+      const size = capture.image.width === capture.area.width ? `${capture.area.width}x${capture.area.height}` : `${capture.area.width}x${capture.area.height}, scaled to ${capture.image.width}x${capture.image.height}`;
       return {
-        text: `Screenshot of PID ${pid} (${size}${saved})`,
+        text: `Screenshot of PID ${pid} (${what}${size}${saved})`,
         image: { data: capture.png.toString("base64"), mimeType: "image/png" }
       };
     }
@@ -25080,80 +25294,161 @@ By default nothing is written to disk. Give save_path to also keep the PNG file.
 ];
 
 // src/tools/pointers.ts
+function scanState(id) {
+  return lua`
+    local ps = (_mcp.pointerScans or {})[${id}]
+    if not ps then _mcp_str = 'Error: pointer scan state lost (Cheat Engine restarted?)' return end`;
+}
 var pointerTools = [
   defineTool({
     name: "ce_pointer_scan",
-    description: `Find static pointers to an address (one level): module addresses holding a pointer to the address or to a structure containing it, e.g. "[game.exe+1A2B0] + 0x48 = target". Static addresses stay valid across game restarts, unlike the target.
+    description: `Find static pointer chains to an address: module addresses from which the address can be reached through pointers, e.g. "[game.exe+1A2B0] + 0x48 = target" (1 level) or "[[game.exe+5F00] + 0x10] + 0x48 = target" (2 levels). Static addresses stay valid across game restarts, unlike the target; the offsets go as is to ce_watch_add.
 
-Runs in the background with a progress window. For deeper chains, use the result as the new target.`,
+Each level runs memory scans in the background with a progress window: level 1 is one scan, each deeper level one scan per group of candidates (max_candidates), so deep searches take longer.`,
     schema: {
       address: external_exports.string().describe("Target address (a value found by a scan)"),
-      max_offset: external_exports.number().int().min(0).max(1048576).default(4096).describe("Largest offset from the pointer to the target (default 0x1000)"),
-      max_results: external_exports.number().int().min(1).max(1e3).default(50).describe("Maximum number of pointers listed"),
-      ...waitSchema
+      max_offset: external_exports.number().int().min(0).max(1048576).default(4096).describe("Largest offset from a pointer to what it points into (default 0x1000)"),
+      max_level: external_exports.number().int().min(1).max(5).default(2).describe("Longest chain searched (pointer levels)"),
+      max_candidates: external_exports.number().int().min(1).max(100).default(10).describe("Heap pointers followed to the next level, closest offsets first"),
+      max_results: external_exports.number().int().min(1).max(1e3).default(50).describe("Maximum number of chains listed")
     },
     writes: false,
     requiresProcess: true,
-    async run({ address, max_offset, max_results, wait }, ctx) {
-      const kind = "pointer scan";
-      return runJob(
-        ctx,
-        kind,
-        lua`(function()
-          ${resolveAddress(address, "target")}
-          local is64 = targetIs64Bit()
-          local low = math.max(0, target - ${max_offset})
-          local ms = createMemScan()
-          ms.VarType = is64 and 'vtQword' or 'vtDword'
-          ms.ScanOption = 'soValueBetween'
-          ms.Hexadecimal = true
-          ms.Scanvalue1 = string.format('%X', low)
-          ms.Scanvalue2 = string.format('%X', target)
-          ms.Startaddress = 0
-          ms.Stopaddress = is64 and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF
-          ms.ScanWritable = 'scanDontCare'
-          ms.ScanExecutable = 'scanDontCare'
-          ms.ScanCopyOnWrite = 'scanDontCare'
-          ms.Fastscanmethod = 'fsmAligned'
-          ms.Fastscanparameter = is64 and '8' or '4'
-          ms.firstScan()
-          return {
-            kind = ${kind}, window = true,
-            run = function(job) ms.waitTillDone() end,
-            update = function(job)
-              local p = ms.getProgress()
-              if p and p.TotalAddressesToScan and p.TotalAddressesToScan > 0 then
-                job.total, job.done = p.TotalAddressesToScan, p.CurrentlyScanned
-                job.message = string.format('pointer scan: %d candidates', p.ResultsFound or 0)
-              end
-            end,
-            finish = function(job)
-              local err = ms.ErrorString
-              if err and err ~= '' then ms.destroy() error('scan error: ' .. err, 0) end
-              local candidates = ms.Results or {}
-              ms.destroy()
-              local found = {}
-              for _, a in ipairs(candidates) do
-                if inModule(a) then
-                  local ptr = readPointer(a)
-                  if ptr and ptr <= target and target - ptr <= ${max_offset} then found[#found + 1] = { a = a, off = target - ptr } end
-                end
-              end
-              -- Smallest offsets first: they most likely point to the structure that holds the value
-              table.sort(found, function(x, y) if x.off ~= y.off then return x.off < y.off end return x.a < y.a end)
-              local out = { string.format('%d static pointer(s) to 0x%X (%d candidates outside modules ignored)', #found, target, #candidates - #found) }
-              for i = 1, math.min(#found, ${max_results}) do
-                local f = found[i]
-                out[#out + 1] = string.format('  [%s] + 0x%X = target', getNameFromAddress(f.a), f.off)
-              end
-              if #found > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #found - ${max_results}) end
-              if #found == 0 then out[#out + 1] = 'None at one level: scan for pointers to a structure further up (larger max_offset), or use CE\'s pointer scanner for deep chains' end
-              return table.concat(out, '\n')
-            end,
+    async run({ address, max_offset, max_level, max_candidates, max_results }, ctx) {
+      const started = await ctx.run(lua`
+        ${resolveAddress(address, "target")}
+        _mcp.pointerScans = _mcp.pointerScans or {}
+        _mcp.nextPointerScan = (_mcp.nextPointerScan or 0) + 1
+        _mcp.pointerScans[_mcp.nextPointerScan] = { target = target, maxOffset = ${max_offset}, statics = {}, visited = {},
+          next = { { address = target } }, notes = {}, scans = 0 }
+        _mcp_str = tostring(_mcp.nextPointerScan)`);
+      const id = Number(started);
+      if (!started || !Number.isInteger(id)) return started ?? "Error: no answer from Cheat Engine";
+      let stopped = "";
+      for (let level = 1; level <= max_level && !stopped; level++) {
+        const prepared = await ctx.run(lua`
+          ${scanState(id)}
+          table.sort(ps.next, function(x, y) if (x.offset or 0) ~= (y.offset or 0) then return (x.offset or 0) < (y.offset or 0) end return x.address < y.address end)
+          if #ps.next > ${max_candidates} then
+            ps.notes[#ps.notes + 1] = string.format('level %d: followed the %d closest of %d heap pointers (raise max_candidates)', ${level}, ${max_candidates}, #ps.next)
+          end
+          ps.frontier = {}
+          for i = 1, math.min(#ps.next, ${max_candidates}) do ps.frontier[i] = ps.next[i] end
+          ps.next = {}
+          if #ps.frontier > 0 then ps.level = ${level} end
+          table.sort(ps.frontier, function(x, y) return x.address < y.address end)
+          ps.ranges = {}
+          for _, n in ipairs(ps.frontier) do
+            local low, last = math.max(0, n.address - ps.maxOffset), ps.ranges[#ps.ranges]
+            if last and low <= last.high + 1 then last.high = math.max(last.high, n.address)
+            else ps.ranges[#ps.ranges + 1] = { low = low, high = n.address } end
+          end
+          _mcp_str = tostring(#ps.ranges)`);
+        const ranges = Number(prepared);
+        if (!prepared || !Number.isInteger(ranges)) return prepared ?? "Error: no answer from Cheat Engine";
+        if (ranges === 0) break;
+        for (let range = 1; range <= ranges; range++) {
+          const kind = `pointer scan level ${level}/${max_level}, scan ${range}/${ranges}`;
+          const result = await runJob(
+            ctx,
+            kind,
+            lua`(function()
+              ${scanState(id)}
+              local r = ps.ranges[${range}]
+              local is64 = targetIs64Bit()
+              local ms = createMemScan()
+              ms.VarType = is64 and 'vtQword' or 'vtDword'
+              ms.ScanOption = 'soValueBetween'
+              ms.Hexadecimal = true
+              ms.Scanvalue1 = string.format('%X', r.low)
+              ms.Scanvalue2 = string.format('%X', r.high)
+              ms.Startaddress = 0
+              ms.Stopaddress = is64 and 0x7FFFFFFFFFFFFFFF or 0xFFFFFFFF
+              ms.ScanWritable = 'scanDontCare'
+              ms.ScanExecutable = 'scanDontCare'
+              ms.ScanCopyOnWrite = 'scanDontCare'
+              ms.Fastscanmethod = 'fsmAligned'
+              ms.Fastscanparameter = is64 and '8' or '4'
+              ms.firstScan()
+              ps.scans = ps.scans + 1
+              return {
+                kind = ${kind}, window = true,
+                run = function(job) ms.waitTillDone() end,
+                update = function(job)
+                  local p = ms.getProgress()
+                  if p and p.TotalAddressesToScan and p.TotalAddressesToScan > 0 then
+                    job.total, job.done = p.TotalAddressesToScan, p.CurrentlyScanned
+                    job.message = string.format('%s: %d candidates', ${kind}, p.ResultsFound or 0)
+                  end
+                end,
+                finish = function(job)
+                  local err = ms.ErrorString
+                  if err and err ~= '' then ms.destroy() error('scan error: ' .. err, 0) end
+                  local results = ms.Results or {}
+                  ms.destroy()
+                  local frontier = ps.frontier
+                  for _, a in ipairs(results) do
+                    local p = not ps.visited[a] and readPointer(a)
+                    if p then
+                      -- The closest candidate at or above the pointed address
+                      local lo, hi = 1, #frontier
+                      while lo < hi do
+                        local mid = (lo + hi) // 2
+                        if frontier[mid].address < p then lo = mid + 1 else hi = mid end
+                      end
+                      local n = frontier[lo]
+                      if n and n.address >= p and n.address - p <= ps.maxOffset then
+                        ps.visited[a] = true
+                        local node = { address = a, via = n, offset = n.address - p, level = ps.level }
+                        if inModule(a) then ps.statics[#ps.statics + 1] = node else ps.next[#ps.next + 1] = node end
+                      end
+                    end
+                  end
+                  return 'ok'
+                end,
+              }
+            end)()`,
+            true
+          );
+          if (result !== "ok") {
+            stopped = result;
+            break;
           }
-        end)()`,
-        wait
-      );
+        }
+      }
+      const report = await ctx.run(lua`
+        ${scanState(id)}
+        _mcp.pointerScans[${id}] = nil
+        local function offsets(node)
+          local list, n = {}, node
+          while n.via do list[#list + 1] = n.offset n = n.via end
+          return list
+        end
+        local function total(node) local t = 0 for _, o in ipairs(offsets(node)) do t = t + o end return t end
+        table.sort(ps.statics, function(x, y)
+          if x.level ~= y.level then return x.level < y.level end
+          local tx, ty = total(x), total(y)
+          if tx ~= ty then return tx < ty end
+          return x.address < y.address
+        end)
+        local out = { string.format('%d static pointer chain(s) to 0x%X (%d level(s) searched, %d memory scans)', #ps.statics, ps.target, ps.level or 0, ps.scans) }
+        for i = 1, math.min(#ps.statics, ${max_results}) do
+          local node = ps.statics[i]
+          local expr, hex = '[' .. getNameFromAddress(node.address) .. ']', {}
+          for j, o in ipairs(offsets(node)) do
+            if j > 1 then expr = '[' .. expr .. ']' end
+            expr = expr .. string.format(' + 0x%X', o)
+            hex[j] = string.format('%X', o)
+          end
+          out[#out + 1] = string.format('  %s = target   (offsets: %s)', expr, table.concat(hex, ', '))
+        end
+        if #ps.statics > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #ps.statics - ${max_results}) end
+        if #ps.statics == 0 then out[#out + 1] = 'None found: raise max_level, max_offset or max_candidates' end
+        for _, note in ipairs(ps.notes) do out[#out + 1] = 'Note: ' .. note end
+        _mcp_str = table.concat(out, '\n')`);
+      if (!report) return "Error: no answer from Cheat Engine";
+      return stopped ? `${report}
+Stopped early: ${stopped}` : report;
     }
   })
 ];
@@ -25183,8 +25478,8 @@ try {
   setSyncError(err.message);
   logger.error("CE plugin script sync failed:", err);
 }
-var session = new Session(PIPE_PATH, "0.1.0");
-var server = createServer(session, allTools, "0.1.0");
+var session = new Session(PIPE_PATH, "0.2.0");
+var server = createServer(session, allTools, "0.2.0");
 var stopping = false;
 async function stop() {
   if (stopping) return;
@@ -25196,4 +25491,4 @@ process.stdin.on("end", () => void stop());
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
 await server.connect(new StdioServerTransport());
-logger.info(`asymptomatik-cheatengine ${"0.1.0"} ready (${allTools.length} tools)`);
+logger.info(`asymptomatik-cheatengine ${"0.2.0"} ready (${allTools.length} tools)`);
