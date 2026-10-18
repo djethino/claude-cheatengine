@@ -25058,13 +25058,34 @@ public static class CemcpWin {
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+  // The largest visible top-level window of the process (Windows' "main window" of a Lazarus or
+  // Delphi program is a hidden zero-size application window); a minimized one only if none is shown
+  public static IntPtr GameWindow(uint pid) {
+    IntPtr best = IntPtr.Zero, minimized = IntPtr.Zero;
+    long bestArea = 0;
+    EnumWindows((hwnd, l) => {
+      uint owner;
+      GetWindowThreadProcessId(hwnd, out owner);
+      if (owner != pid || !IsWindowVisible(hwnd)) return true;
+      if (IsIconic(hwnd)) { minimized = hwnd; return true; }
+      RECT r;
+      GetWindowRect(hwnd, out r);
+      long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+      if (area > bestArea) { bestArea = area; best = hwnd; }
+      return true;
+    }, IntPtr.Zero);
+    return best != IntPtr.Zero ? best : minimized;
+  }
 }
 '@
 # Real pixels: without it, a scaled display (125%, 150%) gives virtualized sizes and a cut image
 [void][CemcpWin]::SetProcessDPIAware()
-$process = Get-Process -Id ${pid}
-$hwnd = $process.MainWindowHandle
-if ($hwnd -eq [IntPtr]::Zero) { throw 'the process has no main window' }
+$hwnd = [CemcpWin]::GameWindow(${pid})
+if ($hwnd -eq [IntPtr]::Zero) { throw 'the process has no visible window' }
 if ([CemcpWin]::IsIconic($hwnd)) { throw 'the window is minimized' }
 $rect = New-Object CemcpWin+RECT
 [void][CemcpWin]::GetWindowRect($hwnd, [ref]$rect)
