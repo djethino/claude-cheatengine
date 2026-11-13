@@ -4,8 +4,8 @@
  */
 
 import { before, after, beforeEach } from 'node:test';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { FakeCE, type FakeCEOptions } from './fake-ce.js';
 import { Session } from '../src/ce/session.js';
 import { createServer } from '../src/server.js';
@@ -44,7 +44,6 @@ export function useHarness(options: FakeCEOptions = {}, extraTools: ToolDef[] = 
     async call(name, args = {}, onProgress) {
       const result = await client!.callTool(
         { name, arguments: args },
-        undefined,
         onProgress ? { onprogress: (p) => onProgress(p.message ?? '') } : undefined,
       );
       const content = result.content as Array<{ type: string; text: string }>;

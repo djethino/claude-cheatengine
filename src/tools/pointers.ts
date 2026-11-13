@@ -169,7 +169,9 @@ Each level runs memory scans in the background with a progress window: level 1 i
           end
           out[#out + 1] = string.format('  %s = target   (offsets: %s)', expr, table.concat(hex, ', '))
         end
-        if #ps.statics > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #ps.statics - ${max_results}) end
+        if #ps.statics > ${max_results} then
+          out[#out + 1] = string.format('  ... %d more, each longer or with larger offsets than those above (sorted best first; max_results goes up to 1000)', #ps.statics - ${max_results})
+        end
         if #ps.statics == 0 then out[#out + 1] = 'None found: raise max_level, max_offset or max_candidates' end
         for _, note in ipairs(ps.notes) do out[#out + 1] = 'Note: ' .. note end
         _mcp_str = table.concat(out, '\n')`);

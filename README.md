@@ -76,7 +76,9 @@ Some details worth knowing:
 - **Code changes go through the address list**: `ce_asm_inject`, `ce_asm_script` and `ce_code_entry` create auto assembler entries you can see and toggle in CE; disabling one restores the original code.
 - **Unity fields by name**: `ce_mono_read_field` / `ce_mono_write_field` use the field's real .NET type. Values protected by the Anti-Cheat Toolkit (`ObscuredInt`, `ObscuredFloat`...) are decrypted, and written back encrypted with their honeypot kept in step; a decoding that the honeypot does not confirm is never written. On such a game the anti-cheat guard applies first.
 - **Screenshots stay off the disk** by default: the image goes straight to Claude. They show the game's picture without the window frame (`client_only`), and `region` zooms on a part at full resolution. Give `save_path` to keep the PNG. The game window must not be minimized.
-- **Lists are paginated** (`offset`, `limit`, `filter`), and long outputs end with a line telling Claude how to read the rest.
+- **Lists are paginated** (`offset`, `limit`, `filter`), and every capped answer says where the rest is: the next page's offset, the next instruction to disassemble, a string read that stopped at its size, pointer chains sorted best first.
+- **Long outputs are never lost**: one longer than 10,000 bytes ends with a line giving its id and offset for `ce_output_more`. Other calls in between do not discard it; the 8 most recent are kept.
+- **Lookups run in parallel**: tools that change nothing (reading memory, listing modules, scan results, Mono metadata...) are marked read-only, so Claude Code can call several at once; Cheat Engine still runs them one after the other.
 
 ## Troubleshooting
 
@@ -102,7 +104,7 @@ Some details worth knowing:
 
 ## How it works
 
-The MCP server (`dist/index.js`, Node.js, no runtime dependency) connects to the Lua server Cheat Engine opens on a named pipe (`openLuaServer`, started by the CE-side plugin). Each tool call becomes one Lua chunk that also applies the SAFE gate and the anti-cheat guard, so the checks cannot be skipped; results come back through CE's pipe protocol. Calls are serialized: Cheat Engine runs every pipe script on its single Lua state.
+The MCP server (`dist/index.js`, Node.js, no runtime dependency; MCP TypeScript SDK v2 and zod 4 bundled) connects to the Lua server Cheat Engine opens on a named pipe (`openLuaServer`, started by the CE-side plugin). Each tool call becomes one Lua chunk that also applies the SAFE gate and the anti-cheat guard, so the checks cannot be skipped; results come back through CE's pipe protocol. Calls are serialized: Cheat Engine runs every pipe script on its single Lua state.
 
 Development: `npm run build` (type check + bundle; `dist/` is committed because Claude Code does not build plugins), `npm test` (offline, against a fake Cheat Engine that runs the generated Lua in a real Lua interpreter).
 

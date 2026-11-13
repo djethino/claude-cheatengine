@@ -16,7 +16,7 @@ import type { LuaCode } from '../lua/lit.js';
 import type { RunOptions, Scope } from '../ce/session.js';
 
 export type Shape = z.ZodRawShape;
-export type Args<S extends Shape> = z.objectOutputType<S, z.ZodTypeAny>;
+export type Args<S extends Shape> = z.output<z.ZodObject<S>>;
 
 export interface ToolContext {
   /** Run a tool body in CE with this tool's gates; returns the text it left in _mcp_str. */
@@ -40,6 +40,18 @@ export interface ToolDef<S extends Shape = Shape> {
   description: string;
   schema: S;
   writes: boolean | ((args: Args<S>) => boolean);
+  /**
+   * Changes nothing at all: not the game, not CE's state (scans, records, watches, breakpoints,
+   * jobs, safety mode, logs, ownership). Declared to the client as readOnlyHint: Claude Code runs
+   * such calls in parallel with each other (the session still runs them one at a time in CE).
+   * Not for crash-prone tools.
+   */
+  readOnly?: boolean;
+  /**
+   * Can return more than 50,000 characters on request: Claude Code would otherwise save such a
+   * result to a file and give Claude a reference to it (declared as anthropic/maxResultSizeChars).
+   */
+  maxResultChars?: number;
   dangerous?: boolean | ((args: Args<S>) => boolean);
   requiresProcess?: boolean;
   /**

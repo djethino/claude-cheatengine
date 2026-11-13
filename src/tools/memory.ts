@@ -123,6 +123,7 @@ export const memoryTools = [
 
   defineTool({
     name: 'ce_list_processes',
+    readOnly: true,
     antiCheatExempt: true,
     description: 'List running processes (paginated).',
     schema: pageSchema(100),
@@ -139,6 +140,7 @@ export const memoryTools = [
 
   defineTool({
     name: 'ce_list_modules',
+    readOnly: true,
     description: 'List modules loaded in the attached process (paginated, in load order).',
     schema: pageSchema(100),
     writes: false,
@@ -154,6 +156,7 @@ export const memoryTools = [
 
   defineTool({
     name: 'ce_memory_regions',
+    readOnly: true,
     description: "List memory regions of the attached process with their protections (paginated). Filter on the line, e.g. '[RW]' or '0x7FF'.",
     schema: pageSchema(50),
     writes: false,
@@ -178,6 +181,7 @@ export const memoryTools = [
 
   defineTool({
     name: 'ce_process_info',
+    readOnly: true,
     description: 'Get detailed information about the attached process.',
     schema: {},
     writes: false,
@@ -205,6 +209,7 @@ export const memoryTools = [
 
   defineTool({
     name: 'ce_read_memory',
+    readOnly: true,
     description: `Read memory at an address.
 
 Integers are shown signed with their hex value (e.g. "-1 (0xFFFFFFFF)"), floats with 9 significant digits.`,
@@ -225,7 +230,12 @@ Integers are shown signed with their hex value (e.g. "-1 (0xFFFFFFFF)"), floats 
           for i, b in ipairs(bytes) do hex[i] = string.format('%02X', b) end
           value = table.concat(hex, ' ')`;
       } else if (type === 'string' || type === 'string_utf16') {
-        read = lua`value = readString(addr, ${size}, ${type === 'string_utf16'})`;
+        // readString stops at the first null or at size characters: say when it is the latter
+        read = lua`
+          value = readString(addr, ${size}, ${type === 'string_utf16'})
+          if value and (utf8.len(value) or #value) >= ${size} then
+            value = value .. string.format(' [stopped at size=%d: the string may continue, raise size]', ${size})
+          end`;
       } else {
         read = lua`value = ${formatRead(type)}`;
       }
@@ -366,6 +376,7 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
 
   defineTool({
     name: 'ce_resolve_address',
+    readOnly: true,
     description: "Resolve a symbol or pointer chain to an address (e.g. 'game.exe+0x1234' or '[[base]+0x10]+0x4').",
     schema: {
       expression: z.string().describe('Address expression'),
@@ -382,6 +393,7 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
 
   defineTool({
     name: 'ce_disassemble',
+    readOnly: true,
     description: 'Disassemble instructions at an address.',
     schema: {
       address: z.string().describe(addressDescription),
@@ -393,12 +405,15 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
       const text = await ctx.run(lua`
         ${resolveAddress(address)}
         local result = {}
+        local complete = true
         for i = 1, ${count} do
           result[i] = disassemble(addr)
           local size = getInstructionSize(addr)
-          if not size or size == 0 then break end
+          if not size or size == 0 then complete = false break end
           addr = addr + size
         end
+        -- Where the next call continues: no instruction size to compute
+        if complete then result[#result + 1] = string.format('next instruction: 0x%X', addr) end
         _mcp_str = table.concat(result, '\n')`);
       return text ?? 'Error: failed to disassemble';
     },
@@ -406,6 +421,7 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
 
   defineTool({
     name: 'ce_struct_view',
+    readOnly: true,
     description: 'View memory at an address with multiple interpretations per 4-byte slot (bytes, int32, float, pointer).',
     schema: {
       address: z.string().describe(addressDescription),

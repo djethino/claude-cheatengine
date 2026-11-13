@@ -300,6 +300,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_results',
+    readOnly: true,
     description: 'List the results of a scan with their current values (paginated).',
     schema: {
       scan_name: scanName,
@@ -346,6 +347,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
 
   defineTool({
     name: 'ce_scan_list',
+    readOnly: true,
     antiCheatExempt: true,
     description: 'List the scans kept by the server, with their result counts.',
     schema: {},

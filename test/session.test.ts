@@ -1,7 +1,7 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeCE } from './fake-ce.js';
-import { Session, BLOCKED_DANGEROUS, BLOCKED_NO_PROCESS, OwnershipError } from '../src/ce/session.js';
+import { Session, BLOCKED_DANGEROUS, BLOCKED_NO_PROCESS, KEPT_TRUNCATED_OUTPUTS, OwnershipError } from '../src/ce/session.js';
 import { CEPipeError } from '../src/ce/pipe.js';
 import { lua } from '../src/lua/lit.js';
 
@@ -64,20 +64,44 @@ test('requiresProcess refuses while no process is opened', async () => {
   assert.equal(await session.exclusive(call(), (s) => s.run(lua`_mcp_str = 'read'`, { requiresProcess: true })), 'read');
 });
 
-test('long output: truncated at maxBytes on a UTF-8 boundary, continued with readMore', async () => {
+/** Id given by a "[truncated: ...]" line. */
+function truncatedId(text: string | null): number {
+  const id = /ce_output_more\(id=(\d+), offset=\d+\)/.exec(text ?? '')?.[1];
+  assert.ok(id, `no truncation line in: ${text}`);
+  return Number(id);
+}
+
+test('long output: truncated at maxBytes on a UTF-8 boundary, continued with readMore under its id', async () => {
   // 'é' is 2 bytes: 7 bytes of 'a' then 'é' puts a character across the 8-byte cut
   const full = 'aaaaaaaé' + 'b'.repeat(20) + 'é';
   const first = await session.exclusive(call(), (s) => s.run(lua`_mcp_str = ${full}`, { maxBytes: 8 }));
-  assert.equal(first, `aaaaaaa\n[truncated: bytes 1-7 of 31 shown. Call ce_output_more(offset=7) next to read the rest; calling any other tool discards it]`);
-  const rest = await session.exclusive(call('ce_output_more'), (s) => s.readMore(7, 100));
+  const id = truncatedId(first);
+  assert.equal(
+    first,
+    `aaaaaaa\n[truncated: bytes 1-7 of 31 shown. Call ce_output_more(id=${id}, offset=7) to read the rest (the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept)]`,
+  );
+  // A continuation that is itself truncated keeps the same id
+  const middle = await session.exclusive(call('ce_output_more'), (s) => s.readMore(id, 7, 10));
+  assert.equal(truncatedId(middle), id);
+  assert.match(middle ?? '', /^ébbbbbbbb\n\[truncated: bytes 8-17 of 31/);
+  const rest = await session.exclusive(call('ce_output_more'), (s) => s.readMore(id, 7, 100));
   assert.equal(rest, 'é' + 'b'.repeat(20) + 'é');
 });
 
-test('another tool call discards the pending continuation', async () => {
-  await session.exclusive(call(), (s) => s.run(lua`_mcp_str = ${'x'.repeat(50)}`, { maxBytes: 10 }));
+test('truncated outputs survive other calls; beyond the kept count the oldest is dropped, with a clear error', async () => {
+  const first = truncatedId(await session.exclusive(call(), (s) => s.run(lua`_mcp_str = ${'x'.repeat(50)}`, { maxBytes: 10 })));
   await session.exclusive(call('other'), (s) => s.run(lua`_mcp_str = 'y'`));
-  const more = await session.exclusive(call('ce_output_more'), (s) => s.readMore(10, 100));
-  assert.match(more, /^Nothing to continue/);
+  assert.equal(await session.exclusive(call('ce_output_more'), (s) => s.readMore(first, 10, 100)), 'x'.repeat(40));
+
+  const ids = [first];
+  for (let i = 1; i <= KEPT_TRUNCATED_OUTPUTS; i++) {
+    ids.push(truncatedId(await session.exclusive(call(), (s) => s.run(lua`_mcp_str = ${String(i).repeat(50)}`, { maxBytes: 10 }))));
+  }
+  const dropped = await session.exclusive(call('ce_output_more'), (s) => s.readMore(first, 10, 100));
+  assert.match(dropped, new RegExp(`^Error: no truncated output ${first} is kept\\. Only the ${KEPT_TRUNCATED_OUTPUTS} most recent are`));
+  assert.equal(ce.eval(`_mcp.more[${first}]`), null); // freed in CE too
+  const newest = ids[ids.length - 1];
+  assert.equal(await session.exclusive(call('ce_output_more'), (s) => s.readMore(newest, 10, 100)), String(KEPT_TRUNCATED_OUTPUTS).repeat(40));
 });
 
 test('64-bit exact transfer of every byte value', async () => {

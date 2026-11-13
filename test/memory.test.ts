@@ -66,6 +66,11 @@ test('bytes and strings, with hostile content', async () => {
   const hostile = "it's ]] \"quoted\"";
   await h.call('ce_write_memory', { address: '0x400040', type: 'string', value: hostile });
   assert.equal((await h.call('ce_read_memory', { address: '0x400040', type: 'string', size: 50 })).text, `0x400040 (string): ${hostile}`);
+  // Read stopped by size, not by the end of the string: said, so the caller knows to read more
+  assert.equal(
+    (await h.call('ce_read_memory', { address: '0x400040', type: 'string', size: 4 })).text,
+    "0x400040 (string): it's [stopped at size=4: the string may continue, raise size]",
+  );
 });
 
 test('invalid and unreadable addresses are errors', async () => {
@@ -117,7 +122,10 @@ test('resolve, disassemble, struct view, process info', async () => {
   h.ce.exec('__fake.pid = 7');
   assert.equal((await h.call('ce_resolve_address', { expression: 'game.exe+20' })).text, 'game.exe+20 = 0x400020 (game.exe+20)');
   assert.equal((await h.call('ce_resolve_address', { expression: 'zz' })).text, 'zz = Not found');
-  assert.equal((await h.call('ce_disassemble', { address: '0x400000', count: 2 })).text, '400000 - 90 - nop\n400001 - 90 - nop');
+  assert.equal(
+    (await h.call('ce_disassemble', { address: '0x400000', count: 2 })).text,
+    '400000 - 90 - nop\n400001 - 90 - nop\nnext instruction: 0x400002',
+  );
   await h.call('ce_write_memory', { address: '0x400100', type: 'int64', value: '0x400200' });
   const view = (await h.call('ce_struct_view', { address: '0x400100', size: 8 })).text;
   assert.match(view, /^=== Structure at 0x400100 ===\n\+0x00: 00 02 40 00 +i32:4194816 .*PTR->0x400200 \(game\.exe\+200\)\n\+0x04: 00 00 00 00 /);

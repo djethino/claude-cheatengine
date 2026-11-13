@@ -108,6 +108,7 @@ export const tableTools = [
 
   defineTool({
     name: 'ce_watch_list',
+    readOnly: true,
     description: "List the entries of CE's address list with their IDs and current values (paginated).",
     schema: pageSchema(100),
     writes: false,
@@ -245,6 +246,7 @@ Either an existing record (record) or an address (a new record is created). The 
 
   defineTool({
     name: 'ce_freeze_list',
+    readOnly: true,
     description: 'List the frozen values and enabled scripts of the address list.',
     schema: {},
     writes: false,

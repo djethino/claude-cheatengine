@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { useHarness } from './harness.js';
 import { Session, BLOCKED_DANGEROUS } from '../src/ce/session.js';
 import { createServer, BLOCKED_READ_ONLY } from '../src/server.js';
@@ -85,8 +85,29 @@ test('read-only mode refuses writing tools before contacting CE', async () => {
 test('long outputs are truncated and continued through ce_output_more', async () => {
   await h.unlock();
   const first = await h.call('ce_lua', { code: "return string.rep('x', 12000)" });
-  assert.match(first.text, /\[truncated: bytes 1-10000 of 12000 shown\. Call ce_output_more\(offset=10000\)/);
-  assert.equal((await h.call('ce_output_more', { offset: 10000 })).text, 'x'.repeat(2000));
+  const id = Number(/\[truncated: bytes 1-10000 of 12000 shown\. Call ce_output_more\(id=(\d+), offset=10000\)/.exec(first.text)?.[1]);
+  assert.ok(id > 0, first.text);
+  // Another call in between (e.g. a parallel read-only one) does not discard it
+  await h.call('ce_safety_status');
+  assert.equal((await h.call('ce_output_more', { id, offset: 10000 })).text, 'x'.repeat(2000));
+});
+
+test('read-only tools never write nor risk a crash, and are announced with readOnlyHint', async () => {
+  const readOnly = allTools.filter((t) => t.readOnly);
+  assert.ok(readOnly.length > 0);
+  for (const t of readOnly) {
+    assert.equal(t.writes, false, `${t.name} is read-only but may write`);
+    assert.ok(!t.dangerous, `${t.name} is read-only but crash-prone`);
+  }
+  const server = createServer(new Session('\\\\.\\pipe\\ce-mcp-unused', 'test'), allTools, 'test');
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const c = new Client({ name: 'test', version: '1' });
+  await c.connect(clientSide);
+  const { tools } = await c.listTools();
+  const hinted = tools.filter((t) => t.annotations?.readOnlyHint === true).map((t) => t.name).sort();
+  assert.deepEqual(hinted, readOnly.map((t) => t.name).sort());
+  await c.close();
 });
 
 test('CE not running: a clear error', async () => {
