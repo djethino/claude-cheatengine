@@ -108,4 +108,13 @@ test('find_instances keeps real objects only, unless unfiltered', async () => {
     (await h.call('ce_mono_find_instances', { class_name: 'Game.Player', unfiltered: true })).text,
     /2 object\(s\) of Game\.Player \(class pointer 0x777 found 2 times, unfiltered\)\n  0x401000\n  0x401100$/,
   );
+  // Beyond max_results: the next page is reachable with offset (max_results alone stops at 1000)
+  assert.match(
+    (await h.call('ce_mono_find_instances', { class_name: 'Game.Player', unfiltered: true, max_results: 1 })).text,
+    /unfiltered\)\n  0x401000\n  \.\.\. 1 more, next page: offset=1 \(scans again: the list can change in between\)$/,
+  );
+  assert.match(
+    (await h.call('ce_mono_find_instances', { class_name: 'Game.Player', unfiltered: true, max_results: 1, offset: 1 })).text,
+    /unfiltered\)\n  objects 2-2:\n  0x401100$/,
+  );
 });

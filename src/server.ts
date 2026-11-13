@@ -69,6 +69,7 @@ export function createServer(session: Session, tools: ToolDef[], version: string
       description: tool.description,
       inputSchema: z.object(tool.schema),
       ...(tool.readOnly && { annotations: { readOnlyHint: true } }),
+      ...(tool.maxResultChars && { _meta: { 'anthropic/maxResultSizeChars': tool.maxResultChars } }),
     };
     server.registerTool(tool.name, config, async (args, ctx): Promise<CallToolResult> => {
       try {

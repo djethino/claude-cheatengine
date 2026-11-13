@@ -61,7 +61,7 @@ export const coreTools = [
   defineTool({
     name: 'ce_get_logs',
     antiCheatExempt: true,
-    description: "Get the CE plugin's log of recent MCP commands (useful for debugging).",
+    description: "Get the CE plugin's log of recent MCP commands (useful for debugging). The plugin keeps the last 50 entries: older ones are gone.",
     schema: {
       clear: z.boolean().default(false).describe('Clear the log buffer after reading'),
     },
@@ -81,6 +81,8 @@ export const coreTools = [
   defineTool({
     name: 'ce_output_more',
     antiCheatExempt: true,
+    // max_bytes up to MAX_OUTPUT_BYTES: a large read the caller asked for stays in the conversation
+    maxResultChars: MAX_OUTPUT_BYTES,
     description: `Read the rest of a tool output that ended with a "[truncated: ...]" line, with the id and offset that line gives.
 
 Other calls in between do not discard it; the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept (none survive a reconnection to Cheat Engine).

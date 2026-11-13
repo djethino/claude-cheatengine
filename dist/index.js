@@ -35002,7 +35002,7 @@ var PIPE_PATH = "\\\\.\\pipe\\ce-mcp";
 var DEFAULT_MAX_BYTES = 1e4;
 var MAX_OUTPUT_BYTES = 1e5;
 var DEFAULT_TIMEOUT_MS = 1e4;
-var MORE_VAR = "_mcp_more";
+var KEPT_TRUNCATED_OUTPUTS = 8;
 var MIN_CE_VERSION = 770;
 var OWNER_LAPSE_S = 60;
 var MARK_OWNER = "OWNER";
@@ -35037,19 +35037,19 @@ var Session = class {
   owner = randomBytes(8).toString("hex");
   readyConnection = -1;
   firstConnection = true;
-  /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
-  moreTotal = 0;
+  /** Truncated outputs kept in CE: id -> byte length, oldest first. */
+  truncated = /* @__PURE__ */ new Map();
+  nextTruncatedId = 1;
   /** PID of the CE serving the pipe, read at every connection: whose dialogs are looked for. */
   pid = null;
   dialogWatchFailed = false;
   /** Run fn with exclusive access to CE. */
   async exclusive(call, fn) {
     let release = await this.mutex.acquire();
-    if (call.tool !== "ce_output_more") this.moreTotal = 0;
     const scope = {
       run: (body, options) => this.run(call, body, options ?? {}),
       runInt: (code, timeoutMs) => this.runInt(code, timeoutMs),
-      readMore: (offset, maxBytes) => this.readMore(offset, maxBytes),
+      readMore: (id, offset, maxBytes) => this.readMore(id, offset, maxBytes),
       pause: async (ms) => {
         release();
         await new Promise((resolve3) => setTimeout(resolve3, ms));
@@ -35158,7 +35158,7 @@ ${describeDialogs(dialogs)}`
     this.pid = Number(await this.exec("return getCheatEngineProcessID()", DEFAULT_TIMEOUT_MS)) || null;
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
-    this.moreTotal = 0;
+    this.truncated.clear();
   }
   async takeOver() {
     await this.ensureReady();
@@ -35263,29 +35263,43 @@ ${describeDialogs(dialogs)}`
     const length = await this.runInt(this.chunk(null, body, {}));
     return length ? this.readString("_mcp_str", Number(length), Number(length), 0) : null;
   }
-  /** Read part of the text kept for continuation by the last truncated output. */
-  async readMore(offset, maxBytes) {
-    if (!this.moreTotal) {
-      return "Nothing to continue: no truncated output is pending (it is discarded as soon as another tool is called)";
+  /** Read part of a truncated output kept for continuation. */
+  async readMore(id, offset, maxBytes) {
+    const total = this.truncated.get(id);
+    if (total === void 0) {
+      return `Error: no truncated output ${id} is kept. Only the ${KEPT_TRUNCATED_OUTPUTS} most recent are, and none survive a reconnection to Cheat Engine: run the tool again.`;
     }
-    if (!Number.isInteger(offset) || offset < 0 || offset >= this.moreTotal) {
-      return `Error: offset must be between 0 and ${this.moreTotal - 1}`;
+    if (!Number.isInteger(offset) || offset < 0 || offset >= total) {
+      return `Error: offset must be between 0 and ${total - 1}`;
     }
     if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_OUTPUT_BYTES) {
       return `Error: max_bytes must be between 1 and ${MAX_OUTPUT_BYTES}`;
     }
-    return await this.readString(MORE_VAR, this.moreTotal, maxBytes, offset) ?? "";
+    return await this.readString(`_mcp.more[${id}]`, total, maxBytes, offset, id) ?? "";
+  }
+  /** Keep the text in _mcp_str in CE for ce_output_more; returns its id. */
+  async keepTruncated(total) {
+    const id = this.nextTruncatedId++;
+    await this.runInt(raw(`_mcp.more = _mcp.more or {}; _mcp.more[${id}] = _mcp_str; return 1`));
+    this.truncated.set(id, total);
+    for (const [oldest] of this.truncated) {
+      if (this.truncated.size <= KEPT_TRUNCATED_OUTPUTS) break;
+      await this.runInt(raw(`_mcp.more[${oldest}] = nil; return 1`));
+      this.truncated.delete(oldest);
+    }
+    return id;
   }
   /**
-   * Transfer bytes [start, start + maxBytes) of a Lua string global, 8 bytes per round trip.
-   * When bytes remain, the text ends with a "[truncated: ...]" line and the full string is kept
-   * in _mcp_more for ce_output_more.
+   * Transfer bytes [start, start + maxBytes) of a Lua string, 8 bytes per round trip.
+   * When bytes remain, the text ends with a "[truncated: ...]" line telling how to read the rest:
+   * the full string is kept in CE under an id for ce_output_more (`keptId` when already kept).
+   * `expression` is Lua built by this class only (a global name or _mcp.more[<integer>]).
    */
-  async readString(varName, total, maxBytes, start) {
+  async readString(expression, total, maxBytes, start, keptId) {
     if (start >= total) return null;
     let end = Math.min(total, start + maxBytes);
     const data = Buffer.alloc(end - start);
-    const variable = raw(varName);
+    const variable = raw(expression);
     for (let pos = start; pos < end; pos += 8) {
       const packed = await this.runInt(lua`
         local a, b, c, d, e, f, g, h = string.byte(${variable}, ${pos + 1}, ${pos + 8})
@@ -35296,21 +35310,19 @@ ${describeDialogs(dialogs)}`
       block.copy(data, pos - start, 0, Math.min(8, end - pos));
     }
     let bytes = data;
+    let id = keptId;
     if (end < total) {
       const cut = incompleteUtf8Tail(bytes);
       if (cut < bytes.length) {
         bytes = bytes.subarray(0, bytes.length - cut);
         end -= cut;
       }
-      if (varName !== MORE_VAR) {
-        await this.runInt(raw(`${MORE_VAR} = ${varName}; return 1`));
-        this.moreTotal = total;
-      }
+      id ??= await this.keepTruncated(total);
     }
     let text = decodeBytes(bytes);
     if (end < total) {
       text += `
-[truncated: bytes ${start + 1}-${end} of ${total} shown. Call ce_output_more(offset=${end}) next to read the rest; calling any other tool discards it]`;
+[truncated: bytes ${start + 1}-${end} of ${total} shown. Call ce_output_more(id=${id}, offset=${end}) to read the rest (the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept)]`;
     }
     return text;
   }
@@ -35383,7 +35395,13 @@ async function callTool(session2, tool, args, ctx) {
 function createServer(session2, tools, version2) {
   const server2 = new McpServer({ name: "cheatengine", version: version2 });
   for (const tool of tools) {
-    server2.registerTool(tool.name, { description: tool.description, inputSchema: external_exports.object(tool.schema) }, async (args, ctx) => {
+    const config2 = {
+      description: tool.description,
+      inputSchema: external_exports.object(tool.schema),
+      ...tool.readOnly && { annotations: { readOnlyHint: true } },
+      ...tool.maxResultChars && { _meta: { "anthropic/maxResultSizeChars": tool.maxResultChars } }
+    };
+    server2.registerTool(tool.name, config2, async (args, ctx) => {
       try {
         const result = await callTool(session2, tool, args, ctx);
         if (typeof result === "string") {
@@ -36127,7 +36145,7 @@ var coreTools = [
   defineTool({
     name: "ce_get_logs",
     antiCheatExempt: true,
-    description: "Get the CE plugin's log of recent MCP commands (useful for debugging).",
+    description: "Get the CE plugin's log of recent MCP commands (useful for debugging). The plugin keeps the last 50 entries: older ones are gone.",
     schema: {
       clear: external_exports.boolean().default(false).describe("Clear the log buffer after reading")
     },
@@ -36146,21 +36164,25 @@ var coreTools = [
   defineTool({
     name: "ce_output_more",
     antiCheatExempt: true,
-    description: `Read the rest of the previous tool's output when it ended with a "[truncated: ...]" line.
+    // max_bytes up to MAX_OUTPUT_BYTES: a large read the caller asked for stays in the conversation
+    maxResultChars: MAX_OUTPUT_BYTES,
+    description: `Read the rest of a tool output that ended with a "[truncated: ...]" line, with the id and offset that line gives.
 
-Must be called right after the truncated call: calling any other tool discards it.
+Other calls in between do not discard it; the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept (none survive a reconnection to Cheat Engine).
 Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is needed.`,
     schema: {
+      id: external_exports.number().int().describe('Id of the truncated output, as given in its "[truncated: ...]" line'),
       offset: external_exports.number().int().describe('Byte offset to resume from, as given in the "[truncated: ...]" line'),
       max_bytes: external_exports.number().int().default(DEFAULT_MAX_BYTES).describe(`Maximum number of bytes to return (1-${MAX_OUTPUT_BYTES})`)
     },
     writes: false,
-    run({ offset, max_bytes }, ctx) {
-      return ctx.scope.readMore(offset, max_bytes);
+    run({ id, offset, max_bytes }, ctx) {
+      return ctx.scope.readMore(id, offset, max_bytes);
     }
   }),
   defineTool({
     name: "ce_safety_status",
+    readOnly: true,
     antiCheatExempt: true,
     description: "Check the current safety mode: SAFE (tools that can crash the game or CE are locked) or UNSAFE.",
     schema: {},
@@ -36377,6 +36399,7 @@ var jobTools = [
   }),
   defineTool({
     name: "ce_job_list",
+    readOnly: true,
     antiCheatExempt: true,
     description: "List the CE jobs that are running or whose result has not been read yet.",
     schema: {},
@@ -36489,6 +36512,7 @@ WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so th
   }),
   defineTool({
     name: "ce_list_processes",
+    readOnly: true,
     antiCheatExempt: true,
     description: "List running processes (paginated).",
     schema: pageSchema(100),
@@ -36504,6 +36528,7 @@ WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so th
   }),
   defineTool({
     name: "ce_list_modules",
+    readOnly: true,
     description: "List modules loaded in the attached process (paginated, in load order).",
     schema: pageSchema(100),
     writes: false,
@@ -36518,6 +36543,7 @@ WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so th
   }),
   defineTool({
     name: "ce_memory_regions",
+    readOnly: true,
     description: "List memory regions of the attached process with their protections (paginated). Filter on the line, e.g. '[RW]' or '0x7FF'.",
     schema: pageSchema(50),
     writes: false,
@@ -36540,6 +36566,7 @@ WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so th
   }),
   defineTool({
     name: "ce_process_info",
+    readOnly: true,
     description: "Get detailed information about the attached process.",
     schema: {},
     writes: false,
@@ -36566,6 +36593,7 @@ WARNING: anti-cheat present (${antiCheats.join(", ")}); UNSAFE mode is on, so th
   }),
   defineTool({
     name: "ce_read_memory",
+    readOnly: true,
     description: `Read memory at an address.
 
 Integers are shown signed with their hex value (e.g. "-1 (0xFFFFFFFF)"), floats with 9 significant digits.`,
@@ -36586,7 +36614,11 @@ Integers are shown signed with their hex value (e.g. "-1 (0xFFFFFFFF)"), floats 
           for i, b in ipairs(bytes) do hex[i] = string.format('%02X', b) end
           value = table.concat(hex, ' ')`;
       } else if (type === "string" || type === "string_utf16") {
-        read = lua`value = readString(addr, ${size}, ${type === "string_utf16"})`;
+        read = lua`
+          value = readString(addr, ${size}, ${type === "string_utf16"})
+          if value and (utf8.len(value) or #value) >= ${size} then
+            value = value .. string.format(' [stopped at size=%d: the string may continue, raise size]', ${size})
+          end`;
       } else {
         read = lua`value = ${formatRead(type)}`;
       }
@@ -36723,6 +36755,7 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
   }),
   defineTool({
     name: "ce_resolve_address",
+    readOnly: true,
     description: "Resolve a symbol or pointer chain to an address (e.g. 'game.exe+0x1234' or '[[base]+0x10]+0x4').",
     schema: {
       expression: external_exports.string().describe("Address expression")
@@ -36738,6 +36771,7 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
   }),
   defineTool({
     name: "ce_disassemble",
+    readOnly: true,
     description: "Disassemble instructions at an address.",
     schema: {
       address: external_exports.string().describe(addressDescription),
@@ -36749,18 +36783,22 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
       const text = await ctx.run(lua`
         ${resolveAddress(address)}
         local result = {}
+        local complete = true
         for i = 1, ${count} do
           result[i] = disassemble(addr)
           local size = getInstructionSize(addr)
-          if not size or size == 0 then break end
+          if not size or size == 0 then complete = false break end
           addr = addr + size
         end
+        -- Where the next call continues: no instruction size to compute
+        if complete then result[#result + 1] = string.format('next instruction: 0x%X', addr) end
         _mcp_str = table.concat(result, '\n')`);
       return text ?? "Error: failed to disassemble";
     }
   }),
   defineTool({
     name: "ce_struct_view",
+    readOnly: true,
     description: "View memory at an address with multiple interpretations per 4-byte slot (bytes, int32, float, pointer).",
     schema: {
       address: external_exports.string().describe(addressDescription),
@@ -37047,6 +37085,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
   }),
   defineTool({
     name: "ce_scan_results",
+    readOnly: true,
     description: "List the results of a scan with their current values (paginated).",
     schema: {
       scan_name: scanName,
@@ -37091,6 +37130,7 @@ exact, greater, less, between, increased_by, decreased_by need one.`,
   }),
   defineTool({
     name: "ce_scan_list",
+    readOnly: true,
     antiCheatExempt: true,
     description: "List the scans kept by the server, with their result counts.",
     schema: {},
@@ -37292,6 +37332,7 @@ var tableTools = [
   }),
   defineTool({
     name: "ce_watch_list",
+    readOnly: true,
     description: "List the entries of CE's address list with their IDs and current values (paginated).",
     schema: pageSchema(100),
     writes: false,
@@ -37418,6 +37459,7 @@ Either an existing record (record) or an address (a new record is created). The 
   }),
   defineTool({
     name: "ce_freeze_list",
+    readOnly: true,
     description: "List the frozen values and enabled scripts of the address list.",
     schema: {},
     writes: false,
@@ -37635,6 +37677,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
   }),
   defineTool({
     name: "ce_breakpoint_results",
+    readOnly: true,
     antiCheatExempt: true,
     description: "Instructions that triggered a watchpoint, with hit counts, registers at the first hit and the function range.",
     schema: {
@@ -38026,6 +38069,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_assemblies",
+    readOnly: true,
     description: "List the .NET assemblies loaded in the game (paginated).",
     schema: pageSchema(100),
     writes: false,
@@ -38039,6 +38083,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_classes",
+    readOnly: true,
     description: 'List the classes of an assembly (paginated, filter on "Namespace.Class").',
     schema: {
       assembly: external_exports.string().default("Assembly-CSharp").describe('Assembly name (".dll" optional); the game code is usually Assembly-CSharp'),
@@ -38061,6 +38106,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_fields",
+    readOnly: true,
     description: "List the fields of a class (inherited ones included): offset, type, name, static/const.",
     schema: { class_name: classArg, assembly: assemblyArg },
     writes: false,
@@ -38084,6 +38130,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
   }),
   defineTool({
     name: "ce_mono_methods",
+    readOnly: true,
     description: "List the methods of a class with their signatures (paginated).",
     schema: { class_name: classArg, assembly: assemblyArg, ...pageSchema(100) },
     writes: false,
@@ -38249,13 +38296,14 @@ Recently freed objects can still match until the GC reuses their memory: check a
       class_name: classArg,
       assembly: assemblyArg,
       max_results: external_exports.number().int().min(1).max(1e3).default(20).describe("Maximum number of objects listed"),
+      offset: external_exports.number().int().min(0).default(0).describe("Objects to skip: the next-page offset given in the output (each call scans memory again)"),
       unfiltered: external_exports.boolean().default(false).describe("List every match of the class pointer, without checking that it is an object"),
       ...waitSchema
     },
     writes: false,
     dangerous: true,
     requiresProcess: true,
-    async run({ class_name, assembly, max_results, unfiltered, wait }, ctx) {
+    async run({ class_name, assembly, max_results, offset, unfiltered, wait }, ctx) {
       const kind = `find ${class_name} instances`;
       return runJob(
         ctx,
@@ -38316,8 +38364,16 @@ Recently freed objects can still match until the GC reuses their memory: check a
               for _, a in ipairs(matches) do if ${unfiltered} or plausible(a) then objects[#objects + 1] = a end end
               local out = { string.format('%d object(s) of %s (class pointer 0x%X found %d times%s)', #objects, ${class_name}, vtable,
                 #matches, ${unfiltered} and ', unfiltered' or (', ' .. (#matches - #objects) .. ' discarded as not objects')) }
-              for i = 1, math.min(#objects, ${max_results}) do out[#out + 1] = string.format('  0x%X', objects[i]) end
-              if #objects > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #objects - ${max_results}) end
+              local last = math.min(#objects, ${offset} + ${max_results})
+              if ${offset} > 0 and ${offset} >= #objects then
+                out[#out + 1] = string.format('  offset=%d is past the end', ${offset})
+              elseif ${offset} > 0 then
+                out[#out + 1] = string.format('  objects %d-%d:', ${offset} + 1, last)
+              end
+              for i = ${offset} + 1, last do out[#out + 1] = string.format('  0x%X', objects[i]) end
+              if #objects > last then
+                out[#out + 1] = string.format('  ... %d more, next page: offset=%d (scans again: the list can change in between)', #objects - last, last)
+              end
               return table.concat(out, '\n')
             end,
           }
@@ -38765,7 +38821,9 @@ Each level runs memory scans in the background with a progress window: level 1 i
           end
           out[#out + 1] = string.format('  %s = target   (offsets: %s)', expr, table.concat(hex, ', '))
         end
-        if #ps.statics > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #ps.statics - ${max_results}) end
+        if #ps.statics > ${max_results} then
+          out[#out + 1] = string.format('  ... %d more, each longer or with larger offsets than those above (sorted best first; max_results goes up to 1000)', #ps.statics - ${max_results})
+        end
         if #ps.statics == 0 then out[#out + 1] = 'None found: raise max_level, max_offset or max_candidates' end
         for _, note in ipairs(ps.notes) do out[#out + 1] = 'Note: ' .. note end
         _mcp_str = table.concat(out, '\n')`);
@@ -38815,6 +38873,7 @@ async function launch(ctx) {
 var lifecycleTools = [
   defineTool({
     name: "ce_dialogs",
+    readOnly: true,
     antiCheatExempt: true,
     outsideCE: true,
     description: `Show the dialogs open in Cheat Engine (they block every other call until answered), with an image of the first one: its text is only readable there.

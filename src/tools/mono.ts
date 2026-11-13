@@ -484,13 +484,14 @@ Recently freed objects can still match until the GC reuses their memory: check a
       class_name: classArg,
       assembly: assemblyArg,
       max_results: z.number().int().min(1).max(1000).default(20).describe('Maximum number of objects listed'),
+      offset: z.number().int().min(0).default(0).describe('Objects to skip: the next-page offset given in the output (each call scans memory again)'),
       unfiltered: z.boolean().default(false).describe('List every match of the class pointer, without checking that it is an object'),
       ...waitSchema,
     },
     writes: false,
     dangerous: true,
     requiresProcess: true,
-    async run({ class_name, assembly, max_results, unfiltered, wait }, ctx) {
+    async run({ class_name, assembly, max_results, offset, unfiltered, wait }, ctx) {
       const kind = `find ${class_name} instances`;
       return runJob(
         ctx,
@@ -551,8 +552,16 @@ Recently freed objects can still match until the GC reuses their memory: check a
               for _, a in ipairs(matches) do if ${unfiltered} or plausible(a) then objects[#objects + 1] = a end end
               local out = { string.format('%d object(s) of %s (class pointer 0x%X found %d times%s)', #objects, ${class_name}, vtable,
                 #matches, ${unfiltered} and ', unfiltered' or (', ' .. (#matches - #objects) .. ' discarded as not objects')) }
-              for i = 1, math.min(#objects, ${max_results}) do out[#out + 1] = string.format('  0x%X', objects[i]) end
-              if #objects > ${max_results} then out[#out + 1] = string.format('  ... %d more (raise max_results)', #objects - ${max_results}) end
+              local last = math.min(#objects, ${offset} + ${max_results})
+              if ${offset} > 0 and ${offset} >= #objects then
+                out[#out + 1] = string.format('  offset=%d is past the end', ${offset})
+              elseif ${offset} > 0 then
+                out[#out + 1] = string.format('  objects %d-%d:', ${offset} + 1, last)
+              end
+              for i = ${offset} + 1, last do out[#out + 1] = string.format('  0x%X', objects[i]) end
+              if #objects > last then
+                out[#out + 1] = string.format('  ... %d more, next page: offset=%d (scans again: the list can change in between)', #objects - last, last)
+              end
               return table.concat(out, '\n')
             end,
           }

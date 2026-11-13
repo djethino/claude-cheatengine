@@ -47,6 +47,11 @@ export interface ToolDef<S extends Shape = Shape> {
    * Not for crash-prone tools.
    */
   readOnly?: boolean;
+  /**
+   * Can return more than 50,000 characters on request: Claude Code would otherwise save such a
+   * result to a file and give Claude a reference to it (declared as anthropic/maxResultSizeChars).
+   */
+  maxResultChars?: number;
   dangerous?: boolean | ((args: Args<S>) => boolean);
   requiresProcess?: boolean;
   /**

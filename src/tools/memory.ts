@@ -230,7 +230,12 @@ Integers are shown signed with their hex value (e.g. "-1 (0xFFFFFFFF)"), floats 
           for i, b in ipairs(bytes) do hex[i] = string.format('%02X', b) end
           value = table.concat(hex, ' ')`;
       } else if (type === 'string' || type === 'string_utf16') {
-        read = lua`value = readString(addr, ${size}, ${type === 'string_utf16'})`;
+        // readString stops at the first null or at size characters: say when it is the latter
+        read = lua`
+          value = readString(addr, ${size}, ${type === 'string_utf16'})
+          if value and (utf8.len(value) or #value) >= ${size} then
+            value = value .. string.format(' [stopped at size=%d: the string may continue, raise size]', ${size})
+          end`;
       } else {
         read = lua`value = ${formatRead(type)}`;
       }
@@ -400,12 +405,15 @@ Integers accept decimal or 0x-hex, signed or unsigned. 'bytes' takes hex bytes l
       const text = await ctx.run(lua`
         ${resolveAddress(address)}
         local result = {}
+        local complete = true
         for i = 1, ${count} do
           result[i] = disassemble(addr)
           local size = getInstructionSize(addr)
-          if not size or size == 0 then break end
+          if not size or size == 0 then complete = false break end
           addr = addr + size
         end
+        -- Where the next call continues: no instruction size to compute
+        if complete then result[#result + 1] = string.format('next instruction: 0x%X', addr) end
         _mcp_str = table.concat(result, '\n')`);
       return text ?? 'Error: failed to disassemble';
     },
