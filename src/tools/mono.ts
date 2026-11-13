@@ -249,6 +249,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_assemblies',
+    readOnly: true,
     description: 'List the .NET assemblies loaded in the game (paginated).',
     schema: pageSchema(100),
     writes: false,
@@ -263,6 +264,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_classes',
+    readOnly: true,
     description: 'List the classes of an assembly (paginated, filter on "Namespace.Class").',
     schema: {
       assembly: z.string().default('Assembly-CSharp').describe('Assembly name (".dll" optional); the game code is usually Assembly-CSharp'),
@@ -286,6 +288,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_fields',
+    readOnly: true,
     description: 'List the fields of a class (inherited ones included): offset, type, name, static/const.',
     schema: { class_name: classArg, assembly: assemblyArg },
     writes: false,
@@ -310,6 +313,7 @@ for finding a value without knowing the structure, ce_scan_value is simpler.`,
 
   defineTool({
     name: 'ce_mono_methods',
+    readOnly: true,
     description: 'List the methods of a class with their signatures (paginated).',
     schema: { class_name: classArg, assembly: assemblyArg, ...pageSchema(100) },
     writes: false,

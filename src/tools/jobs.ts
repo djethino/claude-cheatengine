@@ -123,6 +123,7 @@ export const jobTools = [
 
   defineTool({
     name: 'ce_job_list',
+    readOnly: true,
     antiCheatExempt: true,
     description: 'List the CE jobs that are running or whose result has not been read yet.',
     schema: {},

@@ -40,6 +40,13 @@ export interface ToolDef<S extends Shape = Shape> {
   description: string;
   schema: S;
   writes: boolean | ((args: Args<S>) => boolean);
+  /**
+   * Changes nothing at all: not the game, not CE's state (scans, records, watches, breakpoints,
+   * jobs, safety mode, logs, ownership). Declared to the client as readOnlyHint: Claude Code runs
+   * such calls in parallel with each other (the session still runs them one at a time in CE).
+   * Not for crash-prone tools.
+   */
+  readOnly?: boolean;
   dangerous?: boolean | ((args: Args<S>) => boolean);
   requiresProcess?: boolean;
   /**

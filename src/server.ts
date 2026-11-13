@@ -65,7 +65,12 @@ export function createServer(session: Session, tools: ToolDef[], version: string
   const server = new McpServer({ name: 'cheatengine', version });
 
   for (const tool of tools) {
-    server.registerTool(tool.name, { description: tool.description, inputSchema: z.object(tool.schema) }, async (args, ctx): Promise<CallToolResult> => {
+    const config = {
+      description: tool.description,
+      inputSchema: z.object(tool.schema),
+      ...(tool.readOnly && { annotations: { readOnlyHint: true } }),
+    };
+    server.registerTool(tool.name, config, async (args, ctx): Promise<CallToolResult> => {
       try {
         const result = await callTool(session, tool, args, ctx);
         if (typeof result === 'string') {

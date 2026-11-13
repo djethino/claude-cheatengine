@@ -2,7 +2,7 @@
  * Exclusive, ordered access to Cheat Engine.
  *
  * CE runs every pipe script on its main Lua state and the server passes results through Lua
- * globals (_mcp_str, _mcp_more): two tool calls must never interleave their scripts. A tool
+ * globals (_mcp_str, _mcp.more): two tool calls must never interleave their scripts. A tool
  * call runs inside exclusive(); a long job can give CE back between polls with
  * scope.pause(), so other tools are not blocked while CE works in the background.
  *
@@ -31,8 +31,12 @@ export const MAX_OUTPUT_BYTES = 100_000;
 /** Default limit for one round trip; long synchronous operations pass their own. */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
-/** Lua global holding the full text of the last truncated output, read back by ce_output_more. */
-const MORE_VAR = '_mcp_more';
+/**
+ * Truncated outputs kept in CE (_mcp.more[id]) for ce_output_more. Each has its own id, so other
+ * calls in between (parallel read-only calls included) do not discard it; the oldest is dropped
+ * beyond this many, and ce_output_more says so.
+ */
+export const KEPT_TRUNCATED_OUTPUTS = 8;
 /** getCEVersion() * 100: 7.7 brought memscan FoundCount, ErrorString and Results, used by the scan tools. */
 const MIN_CE_VERSION = 770;
 /** Another server whose last call is older than this has stopped: its claim on CE lapses. */
@@ -97,8 +101,9 @@ export class Session {
   private readonly owner = randomBytes(8).toString('hex');
   private readyConnection = -1;
   private firstConnection = true;
-  /** Byte length of _mcp_more while a continuation is pending, 0 otherwise. */
-  private moreTotal = 0;
+  /** Truncated outputs kept in CE: id -> byte length, oldest first. */
+  private readonly truncated = new Map<number, number>();
+  private nextTruncatedId = 1;
   /** PID of the CE serving the pipe, read at every connection: whose dialogs are looked for. */
   private pid: number | null = null;
   private dialogWatchFailed = false;
@@ -113,12 +118,10 @@ export class Session {
   /** Run fn with exclusive access to CE. */
   async exclusive<T>(call: CallInfo, fn: (scope: Scope) => Promise<T>): Promise<T> {
     let release = await this.mutex.acquire();
-    // A new tool call makes the previous truncated output unreadable (except for ce_output_more)
-    if (call.tool !== 'ce_output_more') this.moreTotal = 0;
     const scope: Scope = {
       run: (body, options) => this.run(call, body, options ?? {}),
       runInt: (code, timeoutMs) => this.runInt(code, timeoutMs),
-      readMore: (offset, maxBytes) => this.readMore(offset, maxBytes),
+      readMore: (id, offset, maxBytes) => this.readMore(id, offset, maxBytes),
       pause: async (ms) => {
         release();
         await new Promise((resolve) => setTimeout(resolve, ms));
@@ -237,7 +240,8 @@ export class Session {
     this.pid = Number(await this.exec('return getCheatEngineProcessID()', DEFAULT_TIMEOUT_MS)) || null;
     this.readyConnection = this.pipe.connectionId;
     this.firstConnection = false;
-    this.moreTotal = 0;
+    // A new connection is a new CE Lua state (or a restarted CE): the kept outputs are gone
+    this.truncated.clear();
   }
 
   private async takeOver(): Promise<void> {
@@ -357,30 +361,45 @@ export class Session {
     return length ? this.readString('_mcp_str', Number(length), Number(length), 0) : null;
   }
 
-  /** Read part of the text kept for continuation by the last truncated output. */
-  private async readMore(offset: number, maxBytes: number): Promise<string> {
-    if (!this.moreTotal) {
-      return 'Nothing to continue: no truncated output is pending (it is discarded as soon as another tool is called)';
+  /** Read part of a truncated output kept for continuation. */
+  private async readMore(id: number, offset: number, maxBytes: number): Promise<string> {
+    const total = this.truncated.get(id);
+    if (total === undefined) {
+      return `Error: no truncated output ${id} is kept. Only the ${KEPT_TRUNCATED_OUTPUTS} most recent are, and none survive a reconnection to Cheat Engine: run the tool again.`;
     }
-    if (!Number.isInteger(offset) || offset < 0 || offset >= this.moreTotal) {
-      return `Error: offset must be between 0 and ${this.moreTotal - 1}`;
+    if (!Number.isInteger(offset) || offset < 0 || offset >= total) {
+      return `Error: offset must be between 0 and ${total - 1}`;
     }
     if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_OUTPUT_BYTES) {
       return `Error: max_bytes must be between 1 and ${MAX_OUTPUT_BYTES}`;
     }
-    return (await this.readString(MORE_VAR, this.moreTotal, maxBytes, offset)) ?? '';
+    return (await this.readString(`_mcp.more[${id}]`, total, maxBytes, offset, id)) ?? '';
+  }
+
+  /** Keep the text in _mcp_str in CE for ce_output_more; returns its id. */
+  private async keepTruncated(total: number): Promise<number> {
+    const id = this.nextTruncatedId++;
+    await this.runInt(raw(`_mcp.more = _mcp.more or {}; _mcp.more[${id}] = _mcp_str; return 1`));
+    this.truncated.set(id, total);
+    for (const [oldest] of this.truncated) {
+      if (this.truncated.size <= KEPT_TRUNCATED_OUTPUTS) break;
+      await this.runInt(raw(`_mcp.more[${oldest}] = nil; return 1`));
+      this.truncated.delete(oldest);
+    }
+    return id;
   }
 
   /**
-   * Transfer bytes [start, start + maxBytes) of a Lua string global, 8 bytes per round trip.
-   * When bytes remain, the text ends with a "[truncated: ...]" line and the full string is kept
-   * in _mcp_more for ce_output_more.
+   * Transfer bytes [start, start + maxBytes) of a Lua string, 8 bytes per round trip.
+   * When bytes remain, the text ends with a "[truncated: ...]" line telling how to read the rest:
+   * the full string is kept in CE under an id for ce_output_more (`keptId` when already kept).
+   * `expression` is Lua built by this class only (a global name or _mcp.more[<integer>]).
    */
-  private async readString(varName: string, total: number, maxBytes: number, start: number): Promise<string | null> {
+  private async readString(expression: string, total: number, maxBytes: number, start: number, keptId?: number): Promise<string | null> {
     if (start >= total) return null;
     let end = Math.min(total, start + maxBytes);
     const data = Buffer.alloc(end - start);
-    const variable = raw(varName);
+    const variable = raw(expression);
 
     for (let pos = start; pos < end; pos += 8) {
       const packed = await this.runInt(lua`
@@ -393,6 +412,7 @@ export class Session {
     }
 
     let bytes: Uint8Array = data;
+    let id = keptId;
     if (end < total) {
       // Stop before a multi-byte character cut in half; the next read starts at it
       const cut = incompleteUtf8Tail(bytes);
@@ -400,17 +420,14 @@ export class Session {
         bytes = bytes.subarray(0, bytes.length - cut);
         end -= cut;
       }
-      if (varName !== MORE_VAR) {
-        await this.runInt(raw(`${MORE_VAR} = ${varName}; return 1`));
-        this.moreTotal = total;
-      }
+      id ??= await this.keepTruncated(total);
     }
 
     let text = decodeBytes(bytes);
     if (end < total) {
       text +=
         `\n[truncated: bytes ${start + 1}-${end} of ${total} shown. ` +
-        `Call ce_output_more(offset=${end}) next to read the rest; calling any other tool discards it]`;
+        `Call ce_output_more(id=${id}, offset=${end}) to read the rest (the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept)]`;
     }
     return text;
   }
@@ -421,7 +438,8 @@ export interface Scope {
   run(body: LuaCode, options?: RunOptions): Promise<string | null>;
   /** Run protocol-internal Lua and return its raw integer result. */
   runInt(code: LuaCode, timeoutMs?: number): Promise<bigint>;
-  readMore(offset: number, maxBytes: number): Promise<string>;
+  /** Read part of truncated output `id` (given in its "[truncated: ...]" line). */
+  readMore(id: number, offset: number, maxBytes: number): Promise<string>;
   /** Give CE back to other tool calls for ms milliseconds (long jobs between two polls). */
   pause(ms: number): Promise<void>;
   /** Claim CE for this server even if another session is using it. */

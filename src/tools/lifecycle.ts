@@ -55,6 +55,7 @@ async function launch(ctx: ToolContext): Promise<string> {
 export const lifecycleTools = [
   defineTool({
     name: 'ce_dialogs',
+    readOnly: true,
     antiCheatExempt: true,
     outsideCE: true,
     description: `Show the dialogs open in Cheat Engine (they block every other call until answered), with an image of the first one: its text is only readable there.

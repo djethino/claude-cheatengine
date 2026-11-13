@@ -90,6 +90,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
 
   defineTool({
     name: 'ce_breakpoint_results',
+    readOnly: true,
     antiCheatExempt: true,
     description: 'Instructions that triggered a watchpoint, with hit counts, registers at the first hit and the function range.',
     schema: {

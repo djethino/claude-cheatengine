@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import { lua } from '../lua/lit.js';
-import { MAX_OUTPUT_BYTES, DEFAULT_MAX_BYTES } from '../ce/session.js';
+import { MAX_OUTPUT_BYTES, DEFAULT_MAX_BYTES, KEPT_TRUNCATED_OUTPUTS } from '../ce/session.js';
 import { defineTool } from './registry.js';
 import { readOnly } from '../options.js';
 import { CEPipeError } from '../ce/pipe.js';
@@ -81,11 +81,12 @@ export const coreTools = [
   defineTool({
     name: 'ce_output_more',
     antiCheatExempt: true,
-    description: `Read the rest of the previous tool's output when it ended with a "[truncated: ...]" line.
+    description: `Read the rest of a tool output that ended with a "[truncated: ...]" line, with the id and offset that line gives.
 
-Must be called right after the truncated call: calling any other tool discards it.
+Other calls in between do not discard it; the ${KEPT_TRUNCATED_OUTPUTS} most recent truncated outputs are kept (none survive a reconnection to Cheat Engine).
 Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is needed.`,
     schema: {
+      id: z.number().int().describe('Id of the truncated output, as given in its "[truncated: ...]" line'),
       offset: z.number().int().describe('Byte offset to resume from, as given in the "[truncated: ...]" line'),
       max_bytes: z
         .number()
@@ -94,13 +95,14 @@ Every 10,000 bytes cost roughly 2,500 tokens of context: read only what is neede
         .describe(`Maximum number of bytes to return (1-${MAX_OUTPUT_BYTES})`),
     },
     writes: false,
-    run({ offset, max_bytes }, ctx) {
-      return ctx.scope.readMore(offset, max_bytes);
+    run({ id, offset, max_bytes }, ctx) {
+      return ctx.scope.readMore(id, offset, max_bytes);
     },
   }),
 
   defineTool({
     name: 'ce_safety_status',
+    readOnly: true,
     antiCheatExempt: true,
     description: 'Check the current safety mode: SAFE (tools that can crash the game or CE are locked) or UNSAFE.',
     schema: {},
