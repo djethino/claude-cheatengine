@@ -39006,8 +39006,8 @@ try {
   setSyncError(err.message);
   logger.error("CE plugin script sync failed:", err);
 }
-var session = new Session(PIPE_PATH, "0.3.1");
-var server = createServer(session, allTools, "0.3.1");
+var session = new Session(PIPE_PATH, "0.4.0");
+var server = createServer(session, allTools, "0.4.0");
 var stopping = false;
 async function stop() {
   if (stopping) return;
@@ -39020,4 +39020,4 @@ process.stdin.on("end", () => void stop());
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
 await server.connect(new StdioServerTransport());
-logger.info(`asymptomatik-cheatengine ${"0.3.1"} ready (${allTools.length} tools)`);
+logger.info(`asymptomatik-cheatengine ${"0.4.0"} ready (${allTools.length} tools)`);
