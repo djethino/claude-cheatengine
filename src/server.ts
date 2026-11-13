@@ -3,16 +3,13 @@
  * exclusive access to Cheat Engine.
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer, type CallToolResult, type ServerContext } from '@modelcontextprotocol/server';
+import { z } from 'zod';
 import { CEPipeError } from './ce/pipe.js';
 import { OwnershipError, type Scope, type Session } from './ce/session.js';
 import { readOnly } from './options.js';
 import { isErrorText, resolveFlag, type Args, type ImageResult, type ToolContext, type ToolDef } from './tools/registry.js';
 import { logger } from './logger.js';
-
-type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 export const BLOCKED_READ_ONLY =
   'BLOCKED: read-only mode is on (plugin option read_only): this tool changes the game or writes a file. The user can turn it off with /plugin configure asymptomatik-cheatengine.';
@@ -23,14 +20,15 @@ function summarize(args: Record<string, unknown>): string {
     .join(' ');
 }
 
-export async function callTool(session: Session, tool: ToolDef, args: Args<ToolDef['schema']>, extra: Extra): Promise<string | ImageResult> {
+export async function callTool(session: Session, tool: ToolDef, args: Args<ToolDef['schema']>, ctx: ServerContext): Promise<string | ImageResult> {
   if (resolveFlag(tool.writes, args) && readOnly()) return BLOCKED_READ_ONLY;
   const dangerous = resolveFlag(tool.dangerous, args);
   const call = { tool: tool.name, args: summarize(args) };
-  const progressToken = extra._meta?.progressToken;
+  const progressToken = ctx.mcpReq._meta?.progressToken;
+  const signal = ctx.mcpReq.signal;
   const progress = async (done: number, total: number | undefined, message: string): Promise<void> => {
     if (progressToken === undefined) return;
-    await extra.sendNotification({
+    await ctx.mcpReq.notify({
       method: 'notifications/progress',
       params: { progressToken, progress: done, ...(total !== undefined && { total }), message },
     });
@@ -41,14 +39,14 @@ export async function callTool(session: Session, tool: ToolDef, args: Args<ToolD
       throw new Error(`${tool.name} works outside CE: it cannot run CE code`);
     };
     const scope = new Proxy({} as Scope, { get: unavailable });
-    return tool.run(args, { scope, signal: extra.signal, run: unavailable, progress, cePid: () => session.cePid });
+    return tool.run(args, { scope, signal, run: unavailable, progress, cePid: () => session.cePid });
   }
 
   try {
     return await session.exclusive(call, (scope) => {
       const ctx: ToolContext = {
         scope,
-        signal: extra.signal,
+        signal,
         run: (body, options) =>
           scope.run(body, { ...options, dangerous, requiresProcess: tool.requiresProcess ?? false, antiCheatGate: !tool.antiCheatExempt }),
         progress,
@@ -67,23 +65,23 @@ export function createServer(session: Session, tools: ToolDef[], version: string
   const server = new McpServer({ name: 'cheatengine', version });
 
   for (const tool of tools) {
-    server.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, async (args: Args<ToolDef['schema']>, extra: Extra) => {
+    server.registerTool(tool.name, { description: tool.description, inputSchema: z.object(tool.schema) }, async (args, ctx): Promise<CallToolResult> => {
       try {
-        const result = await callTool(session, tool, args, extra);
+        const result = await callTool(session, tool, args, ctx);
         if (typeof result === 'string') {
-          return { content: [{ type: 'text' as const, text: result }], ...(isErrorText(result) && { isError: true }) };
+          return { content: [{ type: 'text', text: result }], ...(isErrorText(result) && { isError: true }) };
         }
         return {
           content: [
-            { type: 'image' as const, data: result.image.data, mimeType: result.image.mimeType },
-            { type: 'text' as const, text: result.text },
+            { type: 'image', data: result.image.data, mimeType: result.image.mimeType },
+            { type: 'text', text: result.text },
           ],
         };
       } catch (err) {
         // A bug in the server, not a CE failure: keep the stack in the log
         logger.error(`${tool.name} failed:`, err);
         const message = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+        return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
       }
     });
   }

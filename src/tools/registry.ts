@@ -16,7 +16,7 @@ import type { LuaCode } from '../lua/lit.js';
 import type { RunOptions, Scope } from '../ce/session.js';
 
 export type Shape = z.ZodRawShape;
-export type Args<S extends Shape> = z.objectOutputType<S, z.ZodTypeAny>;
+export type Args<S extends Shape> = z.output<z.ZodObject<S>>;
 
 export interface ToolContext {
   /** Run a tool body in CE with this tool's gates; returns the text it left in _mcp_str. */

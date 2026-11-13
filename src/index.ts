@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { PIPE_PATH, Session } from './ce/session.js';
 import { createServer } from './server.js';
 import { allTools } from './tools/index.js';

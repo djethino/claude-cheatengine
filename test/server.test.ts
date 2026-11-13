@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { useHarness } from './harness.js';
 import { Session, BLOCKED_DANGEROUS } from '../src/ce/session.js';
 import { createServer, BLOCKED_READ_ONLY } from '../src/server.js';

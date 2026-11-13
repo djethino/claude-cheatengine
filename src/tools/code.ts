@@ -43,7 +43,7 @@ Starts CE's debugger on the process if needed (some games detect debuggers).`,
     schema: {
       address: z.string().describe('Address to watch'),
       bp_type: z.enum(['access', 'write', 'execute']).default('access').describe('access = read or write; execute = when the code at the address runs'),
-      size: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(8)]).default(4).describe('Bytes watched (ignored for execute)'),
+      size: z.literal([1, 2, 4, 8]).default(4).describe('Bytes watched (ignored for execute)'),
     },
     writes: true,
     dangerous: true,
